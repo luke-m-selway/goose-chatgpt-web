@@ -123,7 +123,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
-    headed: true,
+    // Normal automated turns run headless; only interactive `loginToChatGpt` opens a visible browser.
+    headed: false,
     proAvailable: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),

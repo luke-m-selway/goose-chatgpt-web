@@ -19,13 +19,11 @@ Closure: implementation, live proof, local validation, scope review, and indepen
 
 ## Next milestone — browser UX and reliability
 
-After the tool-bridge milestone is closed:
+Status as of 2026-08-08: **HEADLESS INCOMPATIBLE.** `defaultConfig()` and `buildSetupConfig()` now default and converge `headed: false` for managed-chrome (`src/config.ts`, `src/setup.ts`); `loginToChatGpt`/`inspectStoredState` remain hardcoded `headless: false` and are unaffected. Static validation passed (`bun test tests/*.test.ts` — 264 passed; `bunx tsc --noEmit` — clean), but a live A/B check on the standalone install's real authenticated session showed `chatgpt.com` serves Cloudflare's `Just a moment...` bot-check challenge to Playwright's headless Chromium (legacy `--headless` flag) and never exposes the composer, while the identical stored session succeeds headed (composer visible in ~11s, real ChatGPT content). Three consecutive headless attempts (two live Goose turns through the standalone bridge, one direct Playwright navigation) reproduced the same Cloudflare redirect; the failure is not login expiry despite the bridge's generic error text. The local standalone install (`~/.goose-chatgpt-web-dev`) was reverted to `headed: true` and the daemon restarted so it keeps working.
 
-- Prefer headless browser operation for normal automated ChatGPT turns so Chrome does not steal focus or move user input into a newly opened browser window.
-- Keep interactive login, account setup and connector configuration headed/visible.
-- If headless proves incompatible with ChatGPT Web, fall back in this order:
-  1. headed without activation/focus theft;
-  2. headed and immediately hidden/minimized.
+- Do not merge headless-by-default until this is resolved; `headed: true` remains the only currently-working runtime default for managed-chrome.
+- Keep interactive login, account setup and connector configuration headed/visible (already true; unaffected by this finding).
+- Candidate follow-ups for a later task, in order: (1) headed without activation/focus theft; (2) headed and immediately hidden/minimized; (3) revisit headless only if a specific anti-detection change (e.g. `--headless=new`, stealth patches) is validated against the real Cloudflare challenge first, not assumed.
 - Investigate why headed managed Chrome showed two ChatGPT tabs during earlier proof runs; session naming explained the second independent turn in those runs, so verify normal operation stays at the minimum required browser surfaces once auxiliary calls are disabled.
 - Add recovery for a crashed or externally killed managed browser so a stale Playwright browser/context handle is discarded and a fresh browser is acquired instead of returning `Target page, context or browser has been closed`.
 - Improve send-stage diagnostics so a rate-limit dialog that appears after submission is classified explicitly instead of degrading into a generic send acknowledgement timeout.

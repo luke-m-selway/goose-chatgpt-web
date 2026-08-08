@@ -17,6 +17,8 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
   process.env.CODEX_LOGIN_ARG_LOG = argsLog;
   try {
     const config = defaultConfig("browser-only");
+    // Runtime turns default to headless (see defaultConfig); login must stay visible regardless.
+    expect(config.headed).toBe(false);
     config.chromeExecutablePath = executable;
     config.storageStatePath = join(root, "browser", "storage-state.json");
     await loginToChatGpt(config, { timeoutMs: 100 }).catch(() => {});

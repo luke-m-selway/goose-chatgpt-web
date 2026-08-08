@@ -567,7 +567,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
-    headed: configured.headed !== false,
+    headed: configured.headed === true,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
   };
 }

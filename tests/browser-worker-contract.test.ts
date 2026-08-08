@@ -76,6 +76,13 @@ test("managed Chrome defaults follow the host platform", () => {
   expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
 });
 
+test("managed Chrome runtime turns default to headless unless a config explicitly opts into headed", () => {
+  const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
+  expect(resolveBrowserConfig(provider).headed).toBe(false);
+  expect(resolveBrowserConfig({ ...provider, chatgptWeb: { headed: false } }).headed).toBe(false);
+  expect(resolveBrowserConfig({ ...provider, chatgptWeb: { headed: true } }).headed).toBe(true);
+});
+
 test("browser stage timeout aborts late page acquisition", async () => {
   let acquisitionAborted = false;
   const runStage = (ChatGptBrowserWorker.prototype as unknown as {

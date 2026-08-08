@@ -185,6 +185,10 @@ export function buildSetupConfig(existing: AppConfig | undefined, options: Setup
   config.standalone = options.standalone === true;
   config.releaseVersion = VERSION;
   config.runtimeCommand = currentRuntimeCommand();
+  // Normal automated turns run headless; only interactive `loginToChatGpt` opens a visible
+  // browser. Force convergence on every setup/update so a pre-existing headed installation
+  // picks up the change too, not just fresh configs.
+  config.headed = false;
   if (options.port !== undefined) {
     if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65_535) throw new Error("--port must be an integer from 1 to 65535");
     config.port = options.port;

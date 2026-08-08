@@ -95,10 +95,27 @@ test("standalone setup produces usable browser-only daemon configuration", () =>
     standalone: true,
     host: "127.0.0.1",
     port: 17841,
-    headed: true,
+    headed: false,
   });
   expect(config.tunnel).toBeUndefined();
   expect(provider.chatgptWeb!.localToolsEnabled).toBe(false);
+});
+
+test("setup converges a pre-existing headed managed-chrome installation to headless", () => {
+  const existing = buildSetupConfig(undefined, {
+    mode: "browser-only",
+    standalone: true,
+    acknowledgedUnofficial: true,
+  });
+  existing.headed = true;
+
+  const converged = buildSetupConfig(existing, {
+    mode: "browser-only",
+    standalone: true,
+    acknowledgedUnofficial: true,
+  });
+
+  expect(converged.headed).toBe(false);
 });
 
 test("standalone setup also allows full mode, enabling local tools without touching Codex", () => {
