@@ -769,7 +769,36 @@ export class ChatGptBrowserWorker {
       throw new Error("Launcher turns require an explicitly leased browser surface");
     }
     const { context } = await this.ensureManagedBrowser();
-    return await context.newPage();
+    const page = await context.newPage();
+    if (this.config.headed) await this.minimizeManagedWindow(page);
+    return page;
+  }
+
+  /**
+   * Headed managed Chrome briefly activates and steals macOS keyboard focus the instant a new
+   * window/tab is shown; there is no Chromium launch flag that suppresses it. Minimizing the
+   * window immediately after creation lets focus return to whatever the user was doing within a
+   * couple of seconds instead of leaving Chrome in the foreground for the whole turn. This is
+   * strictly cosmetic: it must never block or fail a turn, so it is bounded by its own short
+   * timeout independent of the browser_page stage deadline.
+   */
+  private async minimizeManagedWindow(page: Page, timeoutMs = 3_000): Promise<void> {
+    try {
+      await Promise.race([
+        (async () => {
+          const session = await page.context().newCDPSession(page);
+          const { windowId } = await session.send("Browser.getWindowForTarget");
+          await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } });
+        })(),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("minimize timed out")), timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      console.warn(
+        `[chatgpt-web] failed to minimize the managed Chrome window: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private async selectModelAndEffort(
