@@ -4,22 +4,20 @@ This file is the durable handoff for the next implementation steps. Keep it conc
 
 ## Current milestone — finish the first real Goose-owned tool round trip
 
-Status as of 2026-08-08:
+Status as of 2026-08-08: **PASS.** The first real end-to-end Goose-owned tool round trip succeeded (trace `c57eb8d02ba2`): ordinary Goose → `goose-chatgpt-web` standalone full mode → authenticated ChatGPT Web → `Codex Native` connector/tunnel → real Goose-owned MCP tool (`get_proof_nonce`) → matching `function_call_output` resumed the same active browser response → ChatGPT returned the exact unpredictable nonce → Goose displayed it. Exactly one ChatGPT-Web browser turn was created for the successful attempt.
 
 - `setup --full --standalone` implementation is checkpointed on `agent/standalone-goose-tool-bridge`.
 - Standalone full mode, tunnel runtime, MCP broker and authenticated ChatGPT Web text path have been proven live.
-- The tool path has been proven in pieces: ChatGPT can request the connector/tool; the bridge emits a Responses `function_call`; Goose executes the real proof MCP tool; a matching `function_call_output` can resume the same active browser turn and produce the real nonce.
-- The final uninterrupted end-to-end proof is still pending because a burst of repeated test attempts triggered ChatGPT's `Too many requests` / 429 protection.
-- Upstream already detects that rate-limit dialog and surfaces a retryable 429. Do not hammer retries; use a real quiet cooldown and then exactly one fresh proof attempt.
-- During cleanup, forcibly killing Playwright/Chrome exposed a stale-browser-handle failure. The daemon has since been cleanly restarted and is healthy; tunnel and broker remain healthy; no automatic retry loop is active; no ChatGPT request was sent during recovery.
+- Getting to the clean pass required two fixes beyond the original implementation: enabling `autoApproveToolCalls` in the daemon config (otherwise the browser worker waits for a human to click ChatGPT's "Allow ChatGPT to use Codex Native?" dialog and auto-denies on timeout), and disabling Goose's own session-title auxiliary request (see note below).
+- Earlier attempts also surfaced real ChatGPT-side `Too many requests` / 429 throttling and a transient send-stage timeout under concurrent browser turns; both were local/product conditions, not bridge defects — upstream already detects the rate-limit dialog and surfaces a retryable 429.
+- Goose auxiliary model calls can multiply ChatGPT-Web traffic. Goose 1.45.0 session naming generated a second concurrent ChatGPT browser turn during proof testing. The ChatGPT-Web path should initially run with `GOOSE_DISABLE_SESSION_NAMING=true`. No separate per-tool-call LLM summary request was found in Goose 1.45.0.
+- During an earlier cleanup, forcibly killing Playwright/Chrome exposed a stale-browser-handle failure (`Target page, context or browser has been closed`); a clean daemon/service restart (not `pkill -9`) discards the stale handle and lets the browser worker reacquire a fresh one. See the stale-browser-recovery follow-up below.
 
 Next actions:
 
-1. Preserve a genuine zero-request cooldown period.
-2. Perform exactly one integrated ordinary-Goose proof attempt with no preliminary ChatGPT smoke/probe request.
-3. On success, stop all further live proof traffic.
-4. Run local tests/review, commit/push any final fixes, and open a draft PR.
-5. Do not merge without explicit approval.
+1. Local final review (tests, typecheck, diff scope, free-worker review) and any strictly necessary in-scope fixes.
+2. Commit and push the completed milestone.
+3. Open/update a draft PR against `main`. Do not merge without explicit approval.
 
 ## Next milestone — browser UX and reliability
 
