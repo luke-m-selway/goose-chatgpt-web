@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Locator, type Page } from "playwright-core";
 import { atomicWriteFile, defaultChromeExecutable, expandUserPath, getConfigDir } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
@@ -783,21 +783,26 @@ export class ChatGptBrowserWorker {
    * timeout independent of the browser_page stage deadline.
    */
   private async minimizeManagedWindow(page: Page, timeoutMs = 3_000): Promise<void> {
+    let session: CDPSession | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         (async () => {
-          const session = await page.context().newCDPSession(page);
+          session = await page.context().newCDPSession(page);
           const { windowId } = await session.send("Browser.getWindowForTarget");
           await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } });
         })(),
         new Promise<never>((_resolve, reject) => {
-          setTimeout(() => reject(new Error("minimize timed out")), timeoutMs);
+          timer = setTimeout(() => reject(new Error("minimize timed out")), timeoutMs);
         }),
       ]);
     } catch (error) {
       console.warn(
         `[chatgpt-web] failed to minimize the managed Chrome window: ${error instanceof Error ? error.message : String(error)}`,
       );
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (session) await (session as CDPSession).detach().catch(() => {});
     }
   }
 

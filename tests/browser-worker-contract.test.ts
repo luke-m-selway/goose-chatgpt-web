@@ -81,12 +81,14 @@ test("minimizeManagedWindow sends Browser.setWindowBounds(minimized) for the pag
   }).minimizeManagedWindow;
 
   const sent: Array<{ method: string; params?: unknown }> = [];
+  let detached = false;
   const session = {
     send: async (method: string, params?: unknown) => {
       sent.push({ method, params });
       if (method === "Browser.getWindowForTarget") return { windowId: 7 };
       return {};
     },
+    detach: async () => { detached = true; },
   };
   const fakePage = { context: () => ({ newCDPSession: async () => session }) } as unknown as Page;
 
@@ -96,6 +98,7 @@ test("minimizeManagedWindow sends Browser.setWindowBounds(minimized) for the pag
     { method: "Browser.getWindowForTarget", params: undefined },
     { method: "Browser.setWindowBounds", params: { windowId: 7, bounds: { windowState: "minimized" } } },
   ]);
+  expect(detached).toBeTrue();
 });
 
 test("a CDP minimize failure does not throw or block turn creation", async () => {
@@ -120,6 +123,57 @@ test("a hung CDP minimize call gives up after its own bounded timeout instead of
   const start = Date.now();
   await minimizeManagedWindow.call({}, fakePage, 20);
   expect(Date.now() - start).toBeLessThan(2_000);
+});
+
+test("a session created before a hung CDP call is still detached, even if detach itself fails", async () => {
+  const minimizeManagedWindow = (ChatGptBrowserWorker.prototype as unknown as {
+    minimizeManagedWindow(page: Page, timeoutMs?: number): Promise<void>;
+  }).minimizeManagedWindow;
+  let detachAttempted = false;
+  const session = {
+    send: () => new Promise(() => {}),
+    detach: async () => { detachAttempted = true; throw new Error("detach failed"); },
+  };
+  const fakePage = { context: () => ({ newCDPSession: async () => session }) } as unknown as Page;
+
+  await expect(minimizeManagedWindow.call({}, fakePage, 20)).resolves.toBeUndefined();
+  expect(detachAttempted).toBeTrue();
+});
+
+test("minimizeManagedWindow clears its internal timer once the attempt settles", async () => {
+  const minimizeManagedWindow = (ChatGptBrowserWorker.prototype as unknown as {
+    minimizeManagedWindow(page: Page, timeoutMs?: number): Promise<void>;
+  }).minimizeManagedWindow;
+
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const pending = new Set<ReturnType<typeof setTimeout>>();
+  let clearedId: ReturnType<typeof setTimeout> | undefined;
+  globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+    const id = originalSetTimeout(handler, ms);
+    pending.add(id);
+    return id;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+    clearedId = id;
+    return originalClearTimeout(id);
+  }) as typeof clearTimeout;
+
+  try {
+    const session = {
+      send: async (method: string) => method === "Browser.getWindowForTarget" ? { windowId: 1 } : {},
+      detach: async () => {},
+    };
+    const fakePage = { context: () => ({ newCDPSession: async () => session }) } as unknown as Page;
+
+    await minimizeManagedWindow.call({}, fakePage);
+
+    expect(pending.size).toBe(1);
+    expect(clearedId).toBe([...pending][0]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });
 
 test("browser turns have no absolute deadline unless one is explicitly configured", () => {
