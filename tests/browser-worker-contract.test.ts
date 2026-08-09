@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptPromptChunkEnd, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -508,6 +508,58 @@ test("per-chunk synchronization waits for the complete accumulated composer text
   }, {}, expected);
 
   expect(observations).toHaveLength(0);
+});
+
+test("chunk boundary backs off by one code unit instead of splitting a surrogate pair", () => {
+  const emoji = "\u{1F600}"; // U+1F600, encodes as a high/low surrogate pair
+  const text = `${"x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1)}${emoji}y`;
+  // Without the fix, offset 0 + CHATGPT_PROMPT_INSERT_CHUNK_CHARS would land exactly between the
+  // emoji's two surrogate code units.
+  expect(text.charCodeAt(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1)).toBe(emoji.charCodeAt(0));
+  expect(text.charCodeAt(CHATGPT_PROMPT_INSERT_CHUNK_CHARS)).toBe(emoji.charCodeAt(1));
+
+  const end = chatGptPromptChunkEnd(text, 0, CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+
+  expect(end).toBe(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1);
+  expect(text.slice(0, end)).toBe("x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1));
+  expect(text.slice(end)).toBe(`${emoji}y`);
+});
+
+test("chunk boundary is unaffected when no surrogate pair crosses it", () => {
+  const text = "x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS + 5);
+  expect(chatGptPromptChunkEnd(text, 0, CHATGPT_PROMPT_INSERT_CHUNK_CHARS)).toBe(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+});
+
+test("prompt insertion carries an emoji crossing the 100k chunk boundary through as a whole, unbroken chunk", async () => {
+  const emoji = "\u{1F600}";
+  const prompt = `${"x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1)}${emoji}${"y".repeat(50)}`;
+  const inserted: string[] = [];
+  const chunkSyncs: string[] = [];
+  const page = {
+    keyboard: {
+      insertText: async (value: string) => { inserted.push(value); },
+      press: async () => {},
+    },
+  };
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
+
+  await insertPromptText.call({
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => { chunkSyncs.push(expected); },
+  }, page, prompt);
+
+  expect(inserted.join("")).toBe(prompt);
+  expect(inserted).toEqual([
+    "x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1),
+    `${emoji}${"y".repeat(50)}`,
+  ]);
+  for (const chunk of inserted) {
+    expect(chunk.length).toBeLessThanOrEqual(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+    const lastUnit = chunk.charCodeAt(chunk.length - 1);
+    expect(lastUnit >= 0xd800 && lastUnit <= 0xdbff).toBeFalse();
+  }
+  expect(chunkSyncs).toEqual(["x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1)]);
 });
 
 test("final prompt integrity verification remains fail-closed on same-length corruption", async () => {

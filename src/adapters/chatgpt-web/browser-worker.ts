@@ -198,6 +198,22 @@ export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
 
+/**
+ * A fixed-offset UTF-16 slice can land between a surrogate pair (e.g. an emoji), corrupting the
+ * character on either side of the cut. Back the boundary off by one code unit whenever that would
+ * happen so every chunk stays a valid UTF-16 string; the chunk this shortens is picked up whole at
+ * the start of the next insertText call.
+ */
+export function chatGptPromptChunkEnd(text: string, offset: number, maxChars: number): number {
+  const end = Math.min(offset + maxChars, text.length);
+  if (end <= offset || end >= text.length) return end;
+  const beforeCut = text.charCodeAt(end - 1);
+  const afterCut = text.charCodeAt(end);
+  const splitsSurrogatePair = beforeCut >= 0xd800 && beforeCut <= 0xdbff
+    && afterCut >= 0xdc00 && afterCut <= 0xdfff;
+  return splitsSurrogatePair ? end - 1 : end;
+}
+
 export interface BrowserTurn {
   traceId: string;
   modelId: string;
@@ -1216,8 +1232,8 @@ export class ChatGptBrowserWorker {
   }
 
   private async insertPromptText(page: Page, text: string): Promise<void> {
-    for (let offset = 0; offset < text.length; offset += CHATGPT_PROMPT_INSERT_CHUNK_CHARS) {
-      const end = Math.min(offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS, text.length);
+    for (let offset = 0; offset < text.length; ) {
+      const end = chatGptPromptChunkEnd(text, offset, CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
       await page.keyboard.insertText(text.slice(offset, end));
       if (end < text.length) {
         await this.waitForPromptChunkAttached(page, text.slice(0, end).trimStart());
@@ -1225,6 +1241,7 @@ export class ChatGptBrowserWorker {
         // editor. Move to the end of the complete composer before appending the next verified edit.
         await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
       }
+      offset = end;
     }
   }
 

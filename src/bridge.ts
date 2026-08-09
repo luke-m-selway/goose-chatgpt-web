@@ -724,8 +724,8 @@ export function bridgeToResponsesSSE(
               if (currentWebSearch) closeCurrentWebSearch("failed", []);
               const failure = adapterFailureFromEvent(event);
               emit("response.failed", {
-                // Goose 1.45.0 deserializes response.failed.error at the event top level. Preserve
-                // the response snapshot as well for Responses clients that consume that shape.
+                // Goose deserializes response.failed.error at the event top level. Preserve the
+                // response snapshot as well for Responses clients that consume that shape.
                 error: failure.error,
                 response: {
                   ...responseSnapshot("failed", finishedItems),

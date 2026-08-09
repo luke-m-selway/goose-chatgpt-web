@@ -60,7 +60,7 @@ test("response.incomplete carries a present null error field alongside incomplet
   expect(response.incomplete_details).toBeTruthy();
 });
 
-test("response.failed serializes the top-level error required by Goose 1.45.0 while preserving the response snapshot", async () => {
+test("response.failed serializes the top-level error required by Goose while preserving the response snapshot", async () => {
   async function* events(): AsyncGenerator<AdapterEvent> {
     yield { type: "text_delta", text: "before the failure" };
     yield { type: "error", message: "upstream exploded", status: 502, errorType: "server_error" };
