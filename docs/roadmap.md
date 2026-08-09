@@ -75,6 +75,8 @@ Status as of 2026-08-09: **PASS.** ChatGPT-Web (`chatgpt-web/medium`) as ordinar
 
 Near-term sequence: first close the `codex_exec` → Goose `shell` compatibility gap, then validate `chatgpt-web/high` as the normal main model, then prove parallel strictly-free workers. This is near-term because parallel free workers should accelerate subsequent provider integration, research, implementation, and independent review.
 
+Current delegation policy: prefer explicitly selected external strictly-free workers; avoid child-agent delegation here for routine development. If no suitable external free worker is available, the main agent completes the work itself and reports delegation unavailable. Future parallelism should use the external free-worker pool.
+
 Acceptance criteria:
 
 - ChatGPT-Web parent launches exactly two independent workers through Goose-native delegation.
