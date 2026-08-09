@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -450,17 +450,17 @@ test("active composer resolution waits for exactly one visible editor", async ()
   expect(await activeComposer.call({}, page, 500)).toBe(composer);
 });
 
-test("large read-only context is inserted in bounded edits before exact verification", async () => {
-  const prompt = `Act as the model backend for the Codex task encoded below.\n${"x".repeat(819_343)}`;
+test("prompt insertion crosses the previous 200k failure boundary only after exact chunk sync and document-end caret moves", async () => {
+  const prompt = "x".repeat(204_438);
   const calls: Array<[string, string?]> = [];
-  let asserted = "";
   const composer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
   };
   const page = {
     keyboard: {
-      insertText: async (value: string) => { calls.push(["insertText", value]); },
+      insertText: async (value: string) => { calls.push(["insertText", String(value.length)]); },
+      press: async (value: string) => { calls.push(["press", value]); },
     },
   };
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
@@ -473,15 +473,61 @@ test("large read-only context is inserted in bounded edits before exact verifica
   await attachPrompt.call({
     activeComposer: async () => composer,
     insertPromptText,
-    assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
+      calls.push(["chunkCommitted", String(expected.length)]);
+    },
+    assertPromptAttached: async (_page: unknown, value: string) => {
+      calls.push(["assertPrompt", String(value.length)]);
+    },
   }, page, prompt, false);
 
-  const inserted = calls.filter(call => call[0] === "insertText").map(call => call[1] ?? "");
-  expect(calls.slice(0, 2)).toEqual([["fill", ""], ["focus"]]);
-  expect(inserted.every(chunk => chunk.length <= CHATGPT_PROMPT_INSERT_CHUNK_CHARS)).toBeTrue();
-  expect(inserted.length).toBe(5);
-  expect(inserted.join("")).toBe(prompt);
-  expect(asserted).toBe(prompt);
+  expect(CHATGPT_PROMPT_INSERT_CHUNK_CHARS).toBe(100_000);
+  expect(calls).toEqual([
+    ["fill", ""],
+    ["focus"],
+    ["insertText", "100000"],
+    ["chunkCommitted", "100000"],
+    ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
+    ["insertText", "100000"],
+    ["chunkCommitted", "200000"],
+    ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
+    ["insertText", "4438"],
+    ["assertPrompt", "204438"],
+  ]);
+});
+
+test("per-chunk synchronization waits for the complete accumulated composer text", async () => {
+  const expected = "x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+  const observations = [expected.slice(0, -1), expected];
+  const waitForPromptChunkAttached = (ChatGptBrowserWorker.prototype as unknown as {
+    waitForPromptChunkAttached(page: unknown, expected: string): Promise<void>;
+  }).waitForPromptChunkAttached;
+
+  await waitForPromptChunkAttached.call({
+    attachedPromptText: async () => observations.shift() ?? expected,
+  }, {}, expected);
+
+  expect(observations).toHaveLength(0);
+});
+
+test("final prompt integrity verification remains fail-closed on same-length corruption", async () => {
+  const prompt = "x".repeat(204_438);
+  const corrupted = `${prompt.slice(0, 199_979)}y${prompt.slice(199_980)}`;
+  const assertPromptAttached = (ChatGptBrowserWorker.prototype as unknown as {
+    assertPromptAttached(page: unknown, prompt: string): Promise<void>;
+  }).assertPromptAttached;
+  const originalNow = Date.now;
+  let nowCalls = 0;
+  Date.now = () => (nowCalls++ < 2 ? 0 : 20_000);
+  try {
+    await expect(assertPromptAttached.call({
+      attachedPromptText: async () => corrupted,
+    }, {}, prompt)).rejects.toThrow(
+      "ChatGPT composer did not preserve the complete prompt (expectedChars=204438, actualChars=204438, commonPrefixChars=199979)",
+    );
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("connector selection re-resolves the active composer after ChatGPT replaces it", async () => {
@@ -816,7 +862,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["selectConnector"],
     ["selectedConnector"],
     ["selectedFocus"],
-    ["press", "End"],
+    ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
     ["insertText", " context"],
     ["assertPrompt"],
   ]);
