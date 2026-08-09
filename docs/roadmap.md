@@ -61,15 +61,45 @@ Status as of 2026-08-09: **PASS.** Ordinary Goose (the real Goose Desktop/CLI at
 - ChatGPT's own MCP connector intermittently declines a tool call with "This tool call was blocked by OpenAI because we couldn't determine the safety status of the request" or silently skips the call ("No value was returned."), on requests that are otherwise identical to ones that succeed. Observed on 2 of 4 fresh-identity attempts in one session; not something this bridge controls (it is ChatGPT's own connector-side gate on the `autoApproveToolCalls` auto-click), so treat tool-calling turns as retriable rather than guaranteed-first-try.
 - Not re-validated: `doctor`'s tunnel-readiness check is unreliable — it reported "Tunnel runtime is not ready" / a stale `OnStop` log line even immediately after a successful `tunnel restart`, while the tunnel's own health endpoint and real browser/tool traffic were actually healthy. Don't trust `doctor`'s tunnel section as a go/no-go signal without also checking `curl $(cat "~/Library/Application Support/tunnel-client/health/codex-chatgpt-web.url")`.
 
-## Then — reconcile with upstream before more custom development
+## Completed milestone — connector-identity and action-permission reconciliation
 
-Before adding more architecture, inspect the current `miuuyy/codex-chatgpt-web` delta from this fork's base and reuse upstream fixes where possible.
+Status as of 2026-08-09: **PASS.**
+
+- Root cause confirmed: this fork's ChatGPT connector was still bound to the legacy `Codex Native`
+  identity and its pre-v4 two-step `codex_bind_turn` → `binding_id` MCP contract. ChatGPT caches a
+  connector's public MCP contract, including its granted action-permission level, by connector
+  identity. Because that identity predates Goose's tool set (`shell`, `tree`, `analyze`, `load`,
+  `delegate`, all routed through the maximally-gated `codex_tool_call`), ChatGPT was enforcing a
+  stale, insufficient permission grant and blocking those calls with its own action-safety layer
+  before Goose ever executed them — matching upstream `miuuyy/codex-chatgpt-web`'s v2.1.0 "direct
+  Codex harness bridge" release, which hit and fixed the identical class of problem.
+- Adopted from upstream: the connector-identity module pattern (`CHATGPT_CONNECTOR_NAME`,
+  `LEGACY_CHATGPT_CONNECTOR_NAMES`, `resolveSetupConnectorName`, fail-closed migration errors in
+  setup and the browser worker) and the v4 direct turn-token MCP contract (every `codex_*` tool now
+  takes `turn_token` directly; `codex_bind_turn`/`binding_id` are removed, since the broker's
+  `claim` method was already idempotent per token).
+- Adapted for this fork: the fresh identity is `Goose Native` (not upstream's `Codex Native2`),
+  since this fork's outer harness is standalone Goose as well as Codex; `harnessLabel` and the new
+  `connectorName` prompt parameter stay independently parameterized so the transport-contract text
+  names the actual configured connector and the actual outer harness. Goose-owned tool execution,
+  sandboxing, and approval are untouched — this change only affects how ChatGPT is told to reach the
+  MCP bridge, never who executes a tool once ChatGPT calls it.
+- Local validation: `bun test tests/*.test.ts` and `bunx tsc --noEmit` (see PR for exact counts).
+- Not live-validated in this milestone: the actual ChatGPT-side connector recreation and "Allow all
+  actions" grant require a manual step in Luke's ChatGPT account (see the PR description for exact
+  connector name, tunnel, authentication, and permission settings), followed by one live Goose tool
+  round trip through the new connector.
+
+## Then — reconcile with remaining upstream work
+
+Before adding more architecture, keep inspecting the current `miuuyy/codex-chatgpt-web` delta from
+this fork's base and reuse upstream fixes where possible.
 
 Pay particular attention to newer upstream work around:
 
 - rate-limit handling;
-- connector migration/versioning (`Codex Native` / newer connector contracts);
-- model/runtime changes;
+- model/runtime changes (e.g. upstream's `solAvailable`/Sol-Luna model catalog, not yet reviewed for
+  relevance to this fork);
 - browser/runtime reliability;
 - any changes that would supersede custom work in this fork.
 
