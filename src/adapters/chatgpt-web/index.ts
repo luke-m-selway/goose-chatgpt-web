@@ -264,7 +264,8 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
-      const turnCapabilities = parsed._compactionRequest
+      const readOnlyCompaction = parsed._compactionRequest === true || parsed._gooseCompactionRequest === true;
+      const turnCapabilities = readOnlyCompaction
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
       const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
@@ -346,7 +347,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 events.push(event);
                 emit(event);
               };
-              if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitCaptured);
+              if (!readOnlyCompaction) emitProContextWarning(parsed, turnCapabilities, emitCaptured);
               const trace = session.runtime.trace.drain();
               reasoning = trace.map(event => event.text);
               emitTraceEvents(trace, emitCaptured);
@@ -402,7 +403,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitRound);
+            if (!readOnlyCompaction) emitProContextWarning(parsed, turnCapabilities, emitRound);
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken

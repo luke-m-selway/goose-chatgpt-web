@@ -31,6 +31,12 @@ export interface CodexParsedRequest {
    */
   _compactionRequest?: boolean;
   /**
+   * True only for the current stock Goose `complete_fast()` history-compaction request. Unlike
+   * `_compactionRequest`, this still returns an ordinary Responses assistant-message stream; the
+   * flag exists solely to force the browser turn into tool-free compaction semantics.
+   */
+  _gooseCompactionRequest?: boolean;
+  /**
    * True when the current request newly introduced a stored compaction summary/marker. Historical
    * markers restored by previous_response_id expansion were already acknowledged and do not reset
    * provider-private continuation caches again on every later turn.
