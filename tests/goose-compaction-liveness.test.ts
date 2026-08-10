@@ -26,10 +26,13 @@ function stockRequest(history?: string): Record<string, unknown> {
     model,
     stream: true,
     store: false,
-    input: [
-      { type: "message", role: "system", content: [{ type: "input_text", text: stockSystem(history) }] },
-      { type: "message", role: "user", content: [{ type: "input_text", text: STOCK_GOOSE_COMPACTION_USER_PROMPT }] },
-    ],
+    instructions: stockSystem(history),
+    reasoning: { effort: "low" },
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: STOCK_GOOSE_COMPACTION_USER_PROMPT }],
+    }],
   };
 }
 
@@ -52,23 +55,34 @@ function countFrames(sse: string, event: string): number {
 test("recognizes only the stock Goose compaction compound Responses shape", () => {
   expect(isStockGooseCompactionRequestBody(stockRequest())).toBeTrue();
   expect(isStockGooseCompactionRequestBody({ ...stockRequest(), tools: [] })).toBeTrue();
+  expect(isStockGooseCompactionRequestBody({
+    ...stockRequest(),
+    reasoning: { effort: "none" },
+  })).toBeTrue();
 
   const ordinaryNoTools = {
     model,
     stream: true,
     store: false,
-    input: [
-      { type: "message", role: "system", content: [{ type: "input_text", text: "Generate a short session title." }] },
-      { type: "message", role: "user", content: [{ type: "input_text", text: "Title this conversation" }] },
-    ],
+    instructions: "Generate a short session title.",
+    reasoning: { effort: "low" },
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Title this conversation" }],
+    }],
   };
   expect(isStockGooseCompactionRequestBody(ordinaryNoTools)).toBeFalse();
   expect(isStockGooseCompactionRequestBody({
     ...stockRequest(),
     tools: [{ type: "function", name: "noop", parameters: { type: "object" } }],
   })).toBeFalse();
+  expect(isStockGooseCompactionRequestBody({
+    ...stockRequest(),
+    reasoning: { effort: "medium" },
+  })).toBeFalse();
   const changedUser = stockRequest();
-  (changedUser.input as Array<Record<string, unknown>>)[1] = {
+  (changedUser.input as Array<Record<string, unknown>>)[0] = {
     type: "message", role: "user", content: [{ type: "input_text", text: "Summarize this" }],
   };
   expect(isStockGooseCompactionRequestBody(changedUser)).toBeFalse();
