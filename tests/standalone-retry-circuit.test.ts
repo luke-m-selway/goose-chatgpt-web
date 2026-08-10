@@ -173,6 +173,40 @@ test("explicit cancellation opens active or retryable-failed lineages before ses
   expect(browserStarts).toBe(1);
 });
 
+test("delayed success from a cancelled active reservation cannot remove terminal containment", () => {
+  const circuit = new StandaloneRetryCircuit();
+  const first = [user("Do the task")];
+  let browserStarts = 0;
+  const start = () => {
+    circuit.reserve(scope, "exact-a", first);
+    browserStarts += 1;
+  };
+
+  start();
+  expect(circuit.cancelOutstanding()).toBe(1);
+  circuit.noteSuccess("exact-a");
+  expectCircuitOpen(start);
+  expect(browserStarts).toBe(1);
+});
+
+test("delayed retryable failure from a cancelled active reservation cannot restore retry budget", () => {
+  const circuit = new StandaloneRetryCircuit();
+  const first = [user("Do the task")];
+  const delayedFailure = retryableFailure("LATE_CANCELLED_FAILURE");
+  let browserStarts = 0;
+  const start = (key: string, snapshot: unknown[]) => {
+    circuit.reserve(scope, key, snapshot);
+    browserStarts += 1;
+  };
+
+  start("exact-a", first);
+  expect(circuit.cancelOutstanding()).toBe(1);
+  circuit.noteFailure("exact-a", first, delayedFailure);
+  expectCircuitOpen(() => start("exact-a", first));
+  expectCircuitOpen(() => start("exact-b", [...first, user(`Provider error: ${delayedFailure.message}`)]));
+  expect(browserStarts).toBe(1);
+});
+
 test("a genuinely new user instruction recovers naturally after containment", () => {
   const circuit = new StandaloneRetryCircuit();
   const first = [user("Do the task")];

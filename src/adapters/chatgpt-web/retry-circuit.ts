@@ -209,6 +209,12 @@ export class StandaloneRetryCircuit {
     rememberFailureMarker(entry, message);
     if (error instanceof ChatGptWebAdapterError) rememberFailureMarker(entry, error.code);
 
+    // Terminal entries are monotonic. In particular, cancelOutstanding() opens every retained
+    // lineage before aborting its browser session; a failure callback from that already-reserved
+    // browser attempt may arrive afterward. Keep its failure markers for descendant containment,
+    // but never let that stale callback restore retry capacity.
+    if (entry.state === "open") return;
+
     const retryable = error instanceof ChatGptWebAdapterError && error.retryable;
     const rateLimited = error instanceof ChatGptWebAdapterError && error.status === 429;
     entry.state = retryable && !rateLimited && entry.attempts < this.maxBrowserAttempts
@@ -219,6 +225,9 @@ export class StandaloneRetryCircuit {
   noteSuccess(exactKey: string): void {
     const entry = this.entryForExact(exactKey);
     if (!entry) return;
+    // A success callback can race cancellation after its browser attempt was already reserved.
+    // Once cancellation has made the lineage terminal, that stale success must not delete it.
+    if (entry.state === "open") return;
     this.deleteEntry(entry);
   }
 
