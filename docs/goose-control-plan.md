@@ -26,6 +26,32 @@ This document records an **intermediate solution** called **Goose Control**: kee
 
 The initial goal is not full autonomous orchestration. It is simply to remove the human transport layer between planner and executor.
 
+## Canonical architectural roles
+
+Use the **system-role names** below as the canonical technical vocabulary throughout this project:
+
+```text
+Luke / User
+Planner
+Orchestrator
+Workers
+Session Guardian
+Goose Control
+```
+
+Corporate titles are explanatory analogies only. They are useful for describing responsibility boundaries, but they are **not** architecture names and must not be read as a literal reporting org chart.
+
+Approximate analogy:
+
+```text
+Luke / User   ≈ CEO / owner / final authority
+Planner       ≈ Chief of Staff / strategic adviser
+Orchestrator  ≈ COO / operational manager
+Workers       ≈ execution teams
+```
+
+The actual system flow may therefore be `Luke → Planner → Orchestrator → Workers` even though a real-world COO would normally report directly to a CEO rather than through a Chief of Staff. That flow is a software workflow and context boundary, not a corporate reporting claim.
+
 ## Desired user experience
 
 Current flow:
@@ -335,7 +361,7 @@ The MVP should not pretend to provide full autonomous orchestration.
 It does **not** by itself solve:
 
 - automatic wake-up of the planner when Goose completes;
-- persistent planner/COO hierarchy;
+- persistent Planner/Orchestrator hierarchy;
 - autonomous multi-step review/implementation loops while Luke is absent;
 - provider/model routing policy;
 - worker concurrency policy;
@@ -393,13 +419,13 @@ Important observations from the then-current upstream code:
 
 ### Why not wait for or fully implement Palmate first?
 
-A mature planner/COO orchestration system needs much more than removing clipboard relay:
+A mature Planner/Orchestrator system needs much more than removing clipboard relay:
 
 ```text
-persistent strategic planner
-persistent COO
-async planner → COO jobs
-COO task ledger
+persistent Planner
+persistent Orchestrator
+async Planner → Orchestrator jobs
+Orchestrator task ledger
 worker selection
 parallelism
 review loops
@@ -417,7 +443,7 @@ This makes it a strong intermediate milestone even if Palmate later becomes the 
 
 ## Goose Control should not be throwaway work
 
-Design the API so it can survive a later planner/COO architecture.
+Design the API so it can survive a later Planner/Orchestrator architecture.
 
 A generic interface such as:
 
@@ -431,7 +457,7 @@ interrupt_job(job_id)
 can initially mean:
 
 ```text
-ChatGPT planner
+Planner
   ↓
 Goose Control
   ↓
@@ -441,30 +467,28 @@ implementation Goose session
 Later it can mean:
 
 ```text
-Luke — CEO / owner
+Luke / User
   ↕
-strategic planner
+Planner
   ↓ same control interface
-persistent COO Goose session
+persistent Orchestrator session
   ↓
-workers
+Workers
 ```
 
-The transport and session-control layer therefore remains useful; the main evolution is changing the planner's target from direct execution sessions to a persistent orchestrator/COO.
+The transport and session-control layer therefore remains useful; the main evolution is changing the Planner's target from direct execution sessions to a persistent Orchestrator.
 
-## Longer-term owner / planner / COO design preserved here
+## Longer-term Planner / Orchestrator design preserved here
 
-The eventual preferred hierarchy discussed alongside Goose Control is:
+The eventual preferred architecture discussed alongside Goose Control is:
 
 ```text
-                         Luke
-                     CEO / Owner
-                          │
-                          ▼
+                    Luke / User
+                        │
+                        ▼
                 ┌──────────────────┐
-                │ Strategic Planner│
-                │ Chief-of-Staff-  │
-                │ style adviser    │
+                │     Planner      │
+                │ Persistent       │
                 │ ChatGPT-Web High │
                 └────────┬─────────┘
                          │
@@ -472,9 +496,8 @@ The eventual preferred hierarchy discussed alongside Goose Control is:
                          │
                          ▼
                 ┌──────────────────┐
-                │       COO        │
+                │   Orchestrator   │
                 │ Persistent       │
-                │ Orchestrator     │
                 │ ChatGPT-Web High │
                 └────────┬─────────┘
                          │
@@ -493,19 +516,21 @@ The eventual preferred hierarchy discussed alongside Goose Control is:
                   Session Guardian
 ```
 
-The corporate metaphor is useful for separating responsibilities, but it is **not intended as a literal reporting org chart**. A real COO would normally report directly to the CEO rather than through a Chief of Staff. In this system, work may flow planner → COO because the planner is Luke's persistent strategic conversation and converts an approved objective into a structured job. That workflow does not mean the COO is organizationally subordinate to the planner.
+The **system-role names above are canonical**. The corporate analogy is explanatory only:
 
-- **Luke — CEO / owner:** final authority; sets goals, priorities, constraints, and approval boundaries.
-- **Planner — Chief-of-Staff-style strategic adviser:** stays close to Luke; discusses goals, priorities, architecture, trade-offs, and roadmap; converts approved intent into bounded job packets; remains available for conversation while execution runs.
-- **COO / orchestrator:** owns operational execution; decomposes jobs, chooses workers, handles implementation/review loops, validates completion gates, and returns concise operational reports upward.
-- **Workers:** bounded execution agents. They should not recursively create further management layers.
-- **Session Guardian:** deterministic health/recovery plane, not an AI project manager.
+- **Luke / User** — final authority; sets goals, priorities, constraints, and approval boundaries. Rough analogy: CEO / owner.
+- **Planner** — persistent strategic interface; stays close to Luke, discusses goals, priorities, architecture, trade-offs, and roadmap, converts approved intent into bounded job packets, and remains available for conversation while execution runs. Rough analogy: Chief of Staff / strategic adviser.
+- **Orchestrator** — persistent operational manager; decomposes jobs, chooses Workers, manages implementation/review loops, validates completion gates, and returns concise operational reports to the Planner. Rough analogy: COO.
+- **Workers** — bounded execution agents. Rough analogy: teams/employees. They should not recursively create further management layers.
+- **Session Guardian** — deterministic health/recovery plane, not an AI project manager and not part of the corporate analogy.
 
-Do not collapse the planner and COO merely because Goose can technically delegate. A combined planner-orchestrator would become occupied with internal execution decisions and defeat the purpose of keeping the strategic planning conversation continuously available.
+The Planner → Orchestrator handoff is a software workflow and context membrane. It does **not** mean a COO-like role literally reports to a Chief-of-Staff-like role. Do not use the corporate analogy to derive authority or routing rules; use the canonical system roles and explicit policies instead.
+
+Do not collapse the Planner and Orchestrator merely because Goose can technically delegate. A combined Planner/Orchestrator would become occupied with internal execution decisions and defeat the purpose of keeping the strategic planning conversation continuously available.
 
 ### Context membranes
 
-The COO does not need the planner's entire planning history. Prefer structured job packets:
+The Orchestrator does not need the Planner's entire planning history. Prefer structured job packets:
 
 ```text
 objective
@@ -519,7 +544,7 @@ known risks
 stop conditions
 ```
 
-Likewise, workers may return large logs and implementation detail to the COO, but the COO should return to the planner only:
+Likewise, Workers may return large logs and implementation detail to the Orchestrator, but the Orchestrator should return to the Planner only:
 
 ```text
 status
@@ -537,13 +562,13 @@ This protects the strategic context from operational noise.
 Use this only as a qualitative comparison, not an effort estimate:
 
 ```text
-Goose Control MVP          small
-Async Goose Control        small-to-medium
-Persistent planner/COO     substantially larger
-Full autonomous system     larger again
+Goose Control MVP                small
+Async Goose Control              small-to-medium
+Persistent Planner/Orchestrator  substantially larger
+Full autonomous system           larger again
 ```
 
-The important conclusion is that **Goose Control is expected to be materially less work than completing a production-grade Palmate-style planner/COO orchestration layer**, while delivering an immediate usability benefit.
+The important conclusion is that **Goose Control is expected to be materially less work than completing a production-grade Palmate-style Planner/Orchestrator layer**, while delivering an immediate usability benefit.
 
 ## Suggested implementation phases when this is eventually prioritized
 
@@ -597,13 +622,13 @@ Add deterministic target aliases and enough metadata to distinguish continuation
 
 ### Phase 5 — real workflow dogfood
 
-Use Goose Control for actual project work for a period before adding a COO.
+Use Goose Control for actual project work for a period before adding a persistent Orchestrator.
 
 Observe which operations still require manual intervention and which decisions are repetitive enough to move into the later orchestration layer.
 
-### Phase 6 — optional planner/COO evolution
+### Phase 6 — optional Planner/Orchestrator evolution
 
-Only after real usage demonstrates the need, insert a persistent COO between planner and workers, ideally reusing or extending Goose upstream Palmate/Orchestrator rather than creating an unrelated agent runtime.
+Only after real usage demonstrates the need, insert a persistent Orchestrator between the Planner and Workers, ideally reusing or extending Goose upstream Palmate/Orchestrator rather than creating an unrelated agent runtime.
 
 ## MVP acceptance criteria
 
@@ -650,7 +675,7 @@ evaluates result
 sends next job
 ```
 
-That requires an event-driven workflow owner outside the simple request/response connector and is effectively the beginning of the future COO/orchestration layer.
+That requires an event-driven workflow owner outside the simple request/response connector and is effectively the beginning of the future Orchestrator layer.
 
 ## Open questions for the future implementation chat
 
@@ -665,7 +690,7 @@ Re-evaluate rather than inheriting answers blindly:
 7. How should concurrent jobs targeting the same Goose session fail or queue?
 8. What output projection gives the planner enough evidence without unnecessarily copying huge internal logs into the strategic context?
 9. Which authorities may be delegated once at job submission versus requiring a later Luke approval?
-10. At what point does real usage justify inserting the persistent COO instead of continuing direct planner → Goose session control?
+10. At what point does real usage justify inserting the persistent Orchestrator instead of continuing direct Planner → Goose session control?
 
 ## Priority / stop boundary
 
@@ -678,7 +703,7 @@ Do not treat the existence of this file as authorization to:
 - change current compaction work;
 - alter Day Shift;
 - build the Session Guardian;
-- introduce a persistent COO;
+- introduce a persistent Orchestrator;
 - expose new local-machine authority to ChatGPT.
 
 Resume only when Luke explicitly prioritizes **Goose Control** or asks to eliminate the planner↔Goose manual relay.
