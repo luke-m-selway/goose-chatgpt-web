@@ -93,6 +93,6 @@ export function isStockGooseCompactionRequestBody(value: unknown): boolean {
   return user === STOCK_GOOSE_COMPACTION_USER_PROMPT
     && typeof system === "string"
     && system.startsWith(STOCK_GOOSE_COMPACTION_SYSTEM_PREFIX)
-    && system.endsWith(STOCK_GOOSE_COMPACTION_SYSTEM_TAIL)
+    && system.trimEnd().endsWith(STOCK_GOOSE_COMPACTION_SYSTEM_TAIL.trimEnd())
     && system.length >= STOCK_GOOSE_COMPACTION_SYSTEM_PREFIX.length + STOCK_GOOSE_COMPACTION_SYSTEM_TAIL.length;
 }
