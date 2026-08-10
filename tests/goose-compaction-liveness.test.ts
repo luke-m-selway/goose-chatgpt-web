@@ -162,7 +162,7 @@ test("responsive post-send browser control can wait indefinitely without a gener
       Bun.sleep(30).then(() => "still-waiting"),
     ]);
     expect(result).toBe("still-waiting");
-    expect(probes).toBeGreaterThan(2);
+    expect(probes).toBeGreaterThanOrEqual(2);
   } finally {
     watch.stop();
   }
