@@ -453,6 +453,23 @@ export function redactChatGptUiDiagnostic(value: string): string {
 }
 
 const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
+const CHATGPT_BROWSER_SCREENSHOT_CHECKPOINTS = new Set([
+  "response-stalled-30s",
+  "turn-failed",
+]);
+
+export function shouldCaptureChatGptBrowserDiagnosticScreenshot(checkpoint: string): boolean {
+  return CHATGPT_BROWSER_SCREENSHOT_CHECKPOINTS.has(checkpoint);
+}
+
+export async function captureChatGptBrowserDiagnosticScreenshot(
+  page: Pick<Page, "screenshot">,
+  checkpoint: string,
+): Promise<Buffer | undefined> {
+  if (!shouldCaptureChatGptBrowserDiagnosticScreenshot(checkpoint)) return undefined;
+  return page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
+    .catch(() => undefined);
+}
 
 export function browserDiagnosticCheckpoint(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
@@ -502,7 +519,7 @@ class ChatGptBrowserDiagnostics {
       const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
       const [screenshot, state] = await withBrowserControlTimeout(
         () => Promise.all([
-        page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" }),
+        captureChatGptBrowserDiagnosticScreenshot(page, checkpoint),
         page.evaluate(({ composerSelector, effortControlSelector, effortItemSelector, assistantTurnSelector }) => {
           const visible = (element: Element): boolean => {
             const candidate = element as HTMLElement;
@@ -570,7 +587,7 @@ class ChatGptBrowserDiagnostics {
         "ChatGPT browser diagnostic capture timed out",
       );
       const capturedAt = new Date().toISOString();
-      atomicWriteFile(join(this.directory, `${stem}.png`), screenshot);
+      if (screenshot) atomicWriteFile(join(this.directory, `${stem}.png`), screenshot);
       atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
         version: 1,
         capturedAt,
@@ -1246,9 +1263,6 @@ export class ChatGptBrowserWorker {
       await page.keyboard.insertText(text.slice(offset, end));
       if (end < text.length) {
         await this.waitForPromptChunkAttached(page, text.slice(0, end).trimStart());
-        // A plain End key stops at the end of the current visual line in a multiline Lexical
-        // editor. Move to the end of the complete composer before appending the next verified edit.
-        await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
       }
       offset = end;
     }
