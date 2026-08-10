@@ -56,32 +56,40 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function exactInputTextMessage(value: unknown, role: "system" | "user"): string | undefined {
+function exactInputTextMessage(value: unknown, role: "user"): string | undefined {
   const message = record(value);
-  if (!message || message.type !== "message" || message.role !== role || !Array.isArray(message.content)) return undefined;
+  if (!message || (message.type !== undefined && message.type !== "message") || message.role !== role || !Array.isArray(message.content)) {
+    return undefined;
+  }
   if (message.content.length !== 1) return undefined;
   const block = record(message.content[0]);
   return block?.type === "input_text" && typeof block.text === "string" ? block.text : undefined;
 }
 
 /**
- * Recognize the current stock Goose `do_compact()` request after its OpenAI Responses serializer.
+ * Recognize the current stock Goose `do_compact()` request after its ChatGPT Codex Responses
+ * serialization. `complete_fast()` is shared by session naming and other lightweight tasks, so
+ * absence of tools or low reasoning effort alone is not a discriminator.
  *
- * `complete_fast()` is shared by session naming and other lightweight tasks, so absence of tools or
- * thinking alone is not a discriminator. Stock compaction is instead identified by the complete
- * compound wire shape: streaming Responses request, default non-stored mode, exactly the stock
- * rendered compaction system template around arbitrary history, and exactly its one fixed user
- * instruction. This intentionally does not recognize customized compaction templates.
+ * Current Goose serializes the rendered `compaction.md` as `instructions`, exactly one fixed user
+ * message in `input`, `store: false`, a streaming request, no tools, and complete_fast's off/low
+ * reasoning effort. Require that compound shape so ordinary no-tool lightweight completions remain
+ * ordinary. Customized compaction templates intentionally do not match.
  */
 export function isStockGooseCompactionRequestBody(value: unknown): boolean {
   const body = record(value);
   if (!body || body.stream !== true || body.store !== false || body.previous_response_id !== undefined) return false;
   if (body.tool_choice !== undefined || body.parallel_tool_calls !== undefined) return false;
   if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.length !== 0)) return false;
-  if (!Array.isArray(body.input) || body.input.length !== 2) return false;
 
-  const system = exactInputTextMessage(body.input[0], "system");
-  const user = exactInputTextMessage(body.input[1], "user");
+  if (body.reasoning !== undefined) {
+    const reasoning = record(body.reasoning);
+    if (!reasoning || (reasoning.effort !== "none" && reasoning.effort !== "low")) return false;
+  }
+
+  if (!Array.isArray(body.input) || body.input.length !== 1) return false;
+  const user = exactInputTextMessage(body.input[0], "user");
+  const system = body.instructions;
   return user === STOCK_GOOSE_COMPACTION_USER_PROMPT
     && typeof system === "string"
     && system.startsWith(STOCK_GOOSE_COMPACTION_SYSTEM_PREFIX)
