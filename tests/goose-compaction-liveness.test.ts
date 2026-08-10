@@ -260,6 +260,70 @@ test("structured browser-control terminal failure emits one response.failed and 
   expect(sse).toEndWith("data: [DONE]\n\n");
 });
 
+test("stock Goose context-length reductions do not spend or erase the browser-failure recovery budget", () => {
+  const snapshotFor = (history: string) => {
+    const prepared = prepareStandaloneToolRequest(stockRequest(history), standaloneConfig());
+    return standaloneRetrySnapshot(parseRequest(prepared));
+  };
+  const circuit = new StandaloneRetryCircuit(60_000, 16, 2, () => 1);
+  const browserFailure = new ChatGptWebAdapterError(
+    "ChatGPT browser/CDP control path became unresponsive after the message was sent.",
+    { status: 502, errorType: "server_error", code: "chatgpt_browser_control_unresponsive", retryable: true },
+  );
+  const contextFailure = new ChatGptWebAdapterError(
+    "synthetic context preflight failure",
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+  );
+
+  const first = snapshotFor("history A");
+  const reduced = snapshotFor("history B reduced");
+  const recovered = snapshotFor("history C recovered");
+  const terminal = snapshotFor("history D terminal");
+
+  circuit.reserve("goose-compaction-session", "attempt-a", first, "stock-goose-compaction", 400);
+  circuit.noteFailure("attempt-a", first, browserFailure);
+  circuit.reserve("goose-compaction-session", "attempt-b", reduced, "stock-goose-compaction", 300);
+  circuit.noteFailure("attempt-b", reduced, contextFailure);
+  expect(() => circuit.reserve(
+    "goose-compaction-session",
+    "attempt-c",
+    recovered,
+    "stock-goose-compaction",
+    250,
+  )).not.toThrow();
+  circuit.noteFailure("attempt-c", recovered, browserFailure);
+  expect(() => circuit.reserve(
+    "goose-compaction-session",
+    "attempt-d",
+    terminal,
+    "stock-goose-compaction",
+    200,
+  )).toThrow(/retry circuit is open/i);
+});
+
+test("a later larger stock-Goose compaction in the same session starts a fresh lineage", () => {
+  const prepared = prepareStandaloneToolRequest(stockRequest(), standaloneConfig());
+  const snapshot = standaloneRetrySnapshot(parseRequest(prepared));
+  const circuit = new StandaloneRetryCircuit(60_000, 16, 2, () => 1);
+  const failure = new ChatGptWebAdapterError(
+    "ChatGPT browser/CDP control path became unresponsive after the message was sent.",
+    { status: 502, errorType: "server_error", code: "chatgpt_browser_control_unresponsive", retryable: true },
+  );
+
+  circuit.reserve("goose-compaction-session", "old-a", snapshot, "stock-goose-compaction", 400);
+  circuit.noteFailure("old-a", snapshot, failure);
+  circuit.reserve("goose-compaction-session", "old-b", snapshot, "stock-goose-compaction", 300);
+  circuit.noteFailure("old-b", snapshot, failure);
+
+  expect(() => circuit.reserve(
+    "goose-compaction-session",
+    "fresh-a",
+    snapshot,
+    "stock-goose-compaction",
+    500,
+  )).not.toThrow();
+});
+
 test("stock Goose compaction consumes at most PR18's one recovery browser slot", () => {
   const prepared = prepareStandaloneToolRequest(stockRequest(), standaloneConfig());
   const parsed = parseRequest(prepared);

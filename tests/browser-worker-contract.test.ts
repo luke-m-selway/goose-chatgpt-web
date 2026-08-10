@@ -337,7 +337,7 @@ test("isManagedBrowserConnectionLive clears its internal timer once the probe se
   }
 });
 
-test("browser turns have no absolute deadline unless one is explicitly configured", () => {
+test("legacy turnTimeoutMs stays parse-compatible without imposing an accepted-turn deadline", () => {
   const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).turnTimeoutMs).toBeUndefined();
   expect(resolveBrowserConfig({
@@ -348,6 +348,8 @@ test("browser turns have no absolute deadline unless one is explicitly configure
     ...provider,
     chatgptWeb: { turnTimeoutMs: 0 },
   })).toThrow("turnTimeoutMs must be a positive finite number");
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).not.toContain("ChatGPT web turn timed out");
 });
 
 test("resolveBrowserConfig defaults to the current connector identity and rejects the retired one", () => {
@@ -1311,7 +1313,6 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
     "connector-selected",
     "prompt-attachment-complete",
     "file-attachment-complete",
-    "send-ready",
     "send-accepted",
     "tool-confirmation-visible",
     "response-visible",
@@ -1325,6 +1326,11 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   expect(workerSource).toContain('page.screenshot({ animations: "disabled", caret: "hide"');
   expect(workerSource).toContain("atomicWriteFile(join(this.directory, `${stem}.png`), screenshot)");
   expect(workerSource).toContain("CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10");
+  const sendStage = workerSource.slice(
+    workerSource.indexOf('this.runStage(turn.traceId, "send"'),
+    workerSource.indexOf("const controlLiveness = startPostSendBrowserControlLiveness"),
+  );
+  expect(sendStage).not.toContain("diagnostics.capture");
 });
 
 test("visible DOM trace interleaves statuses and explicit intermediate commentary", () => {

@@ -1597,9 +1597,6 @@ export class ChatGptBrowserWorker {
         estimatedInputTokens,
         requestedMode.effort,
       );
-      const deadline = this.config.turnTimeoutMs === undefined
-        ? undefined
-        : Date.now() + this.config.turnTimeoutMs;
       const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
         if (!launcherSurfaceId) {
           const managed = await this.pageForNewTurn();
@@ -1679,7 +1676,6 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT send button is disabled after the complete prompt was attached");
         }
         await settleChatGptUi();
-        await diagnostics.capture(page, "send-ready");
         await throwIfChatGptSessionFailureAlert(page);
         await sendButton.press("Enter");
         const evidence = await this.waitForSubmissionAccepted(
@@ -1724,9 +1720,6 @@ export class ChatGptBrowserWorker {
               const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
               if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
               throw new DOMException("ChatGPT web turn aborted", "AbortError");
-            }
-            if (deadline !== undefined && Date.now() >= deadline) {
-              throw new Error("ChatGPT web turn timed out");
             }
             if (Date.now() - lastHeartbeat >= 10_000) {
               turn.onHeartbeat?.();
