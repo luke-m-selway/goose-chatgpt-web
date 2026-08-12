@@ -1,6 +1,6 @@
 # goose-chatgpt-web roadmap
 
-This file contains **current and next work only**. The older chronological engineering diary remains in Git history at `dd44b74` and is historical, not a source of current lifecycle or priority instructions.
+This file contains **current and next provider/runtime work only**. The older chronological engineering diary remains in Git history at `dd44b74` and is historical, not a source of current lifecycle or priority instructions.
 
 ## Current runtime checkpoint — qualified
 
@@ -14,45 +14,33 @@ Status: **current/proven**, with one named validation gap.
 - Ordered macOS autostart is implemented with one login-visible coordinator that invokes canonical `lifecycle start`; daemon/tunnel launchd definitions live under the runtime home and remain launchd-supervised.
 - The earlier failed in-task lifecycle/autostart proof was self-interference from the active BrowserHost-backed turn, not a general Electron regression.
 
-Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item, but Goose Control is no longer deferred behind additional Electron reliability work.
+Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item but is not a blocker for bounded provider-level qualification work.
 
-## Active next milestone — Goose Control first proof
+## Next provider qualification — ChatGPT-Web child concurrency
 
-Status: **active; not implemented yet**.
+Status: **planning/testing; not yet qualified.**
 
-Build the smallest end-to-end Planner-to-Goose bridge described in [`goose-control-plan.md`](goose-control-plan.md):
+The Electron implementation is structurally multi-turn: BrowserHost and helper layers support multiple independently identified browser turns, with a hard implementation ceiling of five simultaneous ChatGPT browser surfaces. That ceiling is a safety bound, not a qualified operating recommendation.
 
-```text
-ChatGPT Planner
-  → private custom GPT
-  → GPT Action
-  → authenticated HTTPS REST/OpenAPI facade
-  → authenticated loopback Goose ACP
-  → one hard-approved persisted Goose session
-```
+The practical qualification target is deliberately smaller:
 
-First-proof requirements:
+- normal target: one ChatGPT-Web parent + up to two ChatGPT-Web children;
+- rare optional target: parent + three children;
+- do not optimize for five simultaneous children without a demonstrated use case.
 
-- continuation only;
-- short synchronous bounded `submit_turn`;
-- mandatory idempotent `request_id`;
-- final user-visible Goose result only;
-- no arbitrary cwd/provider/model;
-- no new sessions;
-- no multi-target registry;
-- no cancellation;
-- no Orchestrator/Palmate;
-- no Electron/lifecycle/autostart changes.
+Current evidence does **not** yet prove ChatGPT-Web parent → ChatGPT-Web child under the final Electron runtime. The first disposable attempt was blocked by ChatGPT/OpenAI tool-call safety before any child launched, so it is not evidence of an Electron concurrency failure.
 
-The ACP backend and persisted-session contract are settled. Do not spend this milestone rediscovering browser identity, inventing a second Goose session API, or treating Orchestrator as the transport.
+Qualification should separate:
 
-## Next Goose Control phases — deferred until the first proof
+1. Goose-native delegate/recipe invocation behavior;
+2. connector/tool-call safety acceptance;
+3. Electron simultaneous-turn isolation;
+4. Goose Native turn/tool-authority isolation;
+5. account-level 429/rate behavior.
 
-1. If measured GPT Action behavior requires it, or after the synchronous bridge is proven, introduce `submit_task → job_id → get_job` around native ACP `session/prompt`.
-2. Add cancellation through native ACP cancellation when needed.
-3. Add a deterministic server-controlled target registry after one-target behavior is stable.
-4. Add approved fresh-session profiles through ACP `session/new` only if real workflows require them.
-5. Dogfood direct Planner → Goose Control before inserting a persistent Orchestrator/Palmate workflow layer.
+Prefer the normal Goose-native recipe/worker/subagent path if that matches the previously proven delegation pattern. Make no transport code changes until a live proof identifies a transport defect.
+
+If one child passes, prove genuine parent/child overlap. If that is clean, test two children concurrently. Only then consider a third child. Document only the exact concurrency envelope that passes live.
 
 ## Separate remaining runtime validation
 
@@ -67,3 +55,24 @@ reboot/login
 ```
 
 Do not perform this from a Goose turn that depends on the runtime being restarted.
+
+## Deferred maintenance — mechanical naming migration
+
+Current conceptual terminology is already Goose-first, but inherited implementation/persisted/public identifiers remain. [`naming.md`](naming.md) is the durable compatibility plan for migrating them later as a dedicated milestone.
+
+Known families include:
+
+- `CODEX_CHATGPT_WEB_*`;
+- `io.github.codex-chatgpt-web.*`;
+- `codex_tool_call` and related connector-visible actions;
+- `scripts/start-goose-launcher.ts`;
+- package/bin/application identifiers;
+- runtime/application-support directories and other persisted state.
+
+Do not mix these renames into subagent/concurrency work or other reliability fixes. The later migration must inventory all consumers, preserve installed/autostart/browser-auth state, handle connector schema caching deliberately, and prove upgrade compatibility.
+
+## Cross-project boundary — Goose Control
+
+Goose Control is provider-agnostic Planner-to-Goose control infrastructure. Active ownership/planning belongs in the separate Day Shift project, not in this provider/browser repository.
+
+This repository may retain historical Goose Control material for ACP/security context, but no Electron/CDP/BrowserHost behavior should be designed around it. `goose-chatgpt-web` should provide a reliable ChatGPT-Web provider; Day Shift decides when and how to use that provider alongside Codex ACP, Claude ACP, and free workers.
