@@ -36,7 +36,7 @@ Electron owns BrowserHost only. It does **not** own the Responses daemon or the 
 
 Status as of 2026-08-12: **current/proven**, with one explicitly unrun autostart proof.
 
-The known-good Electron checkpoint is `c624274` (`Checkpoint proven Electron lifecycle and Goose inference`). Current `main` then adds `dd44b74` (`Add ordered macOS autostart coordinator`).
+The known-good Electron checkpoint is `c624274` (`Checkpoint proven Electron lifecycle and Goose inference`), ordered macOS autostart was added at `dd44b74`, and the current reconciled documentation baseline is `40c29bf` (`Reconcile runtime and Goose Control documentation`).
 
 The canonical lifecycle is:
 
@@ -64,43 +64,33 @@ Ordered autostart is implemented on current `main`:
 
 **NOT RUN:** an actual Mac reboot/login reconstruction proof. Do not describe reboot/login recovery as validated until that exact proof is performed.
 
-Operator entry points remain the current legacy-named executable surface:
+Operator entry points still expose inherited implementation naming:
 
 ```bash
 codex-chatgpt-web lifecycle <status|start|restart|stop>
 codex-chatgpt-web autostart <status|install|trigger|disable>
 ```
 
-Those literal names are inherited implementation identifiers; they do not change the Goose-first ownership model above.
+Those literal names are compatibility debt, not the conceptual architecture. Their eventual migration, together with inherited environment variables, service labels, connector action names, BrowserHost scripts, package/bin names, and runtime directories, is deliberately planned in [`docs/naming.md`](docs/naming.md). Do not rename them piecemeal.
 
-## Next active milestone — Goose Control
+## Project boundary: Goose Control
 
-Goose Control is now the next active project milestone. It is a Planner-to-Goose management path and is separate from both Electron BrowserHost identity and Goose Native's per-turn `turn_token` authority.
+Goose Control is **not** an Electron/ChatGPT-Web transport component. It is provider-agnostic Planner-to-Goose control infrastructure and active ownership/planning has moved to the separate Day Shift project.
 
-The settled backend is authenticated loopback `goose serve` ACP. The first practical Planner-facing proof is intentionally small:
+This repository retains [`docs/goose-control-plan.md`](docs/goose-control-plan.md) only as historical/cross-project context and for reusable ACP/security lessons. It must not become a reason to couple Goose Control to BrowserHost/CDP identity or to Goose Native's per-turn `turn_token` authority.
 
-```text
-ChatGPT Planner
-  → private custom GPT in the existing web conversation
-  → GPT Action
-  → narrow authenticated HTTPS REST/OpenAPI Goose Control facade
-  → authenticated loopback Goose ACP
-  → one hard-approved persisted Goose session
-```
-
-The first proof is continuation-only and synchronous/bounded: one idempotent `submit_turn` request with mandatory `request_id`, returning only the final user-visible Goose result. Async jobs, cancellation, multiple targets, fresh sessions, and Orchestrator/Palmate remain later phases.
-
-See [`docs/goose-control-plan.md`](docs/goose-control-plan.md).
+`goose-chatgpt-web` should continue to own provider/browser-specific qualifications. For example, proving whether one ChatGPT-Web parent can safely run one or more ChatGPT-Web child provider turns under Electron belongs here when explicitly resumed; the later policy for when Day Shift should use such children belongs in Day Shift.
 
 ## Documentation
 
-Start with [`docs/README.md`](docs/README.md). It classifies current, active, deferred, and historical material.
+Start with [`docs/README.md`](docs/README.md). It classifies current, deferred, and historical material.
 
 - [`docs/architecture.md`](docs/architecture.md) — current ownership and request/tool flow.
 - [`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md) — canonical lifecycle, BrowserHost readiness, autostart status, and proof boundaries.
-- [`docs/goose-control-plan.md`](docs/goose-control-plan.md) — next active Goose Control milestone.
-- [`docs/roadmap.md`](docs/roadmap.md) — current and next work only.
+- [`docs/naming.md`](docs/naming.md) — current Goose-first terminology and deferred mechanical runtime/ABI rename plan.
+- [`docs/roadmap.md`](docs/roadmap.md) — current provider/runtime work and explicit remaining validation.
 - [`docs/security-model.md`](docs/security-model.md) — trust and capability boundaries.
+- [`docs/history/README.md`](docs/history/README.md) — historical architecture/documentation index and immutable checkpoints.
 - [`AGENTS.md`](AGENTS.md) — mandatory rules for coding/automation agents.
 
 ## Development
