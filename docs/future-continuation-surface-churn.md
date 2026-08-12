@@ -159,6 +159,101 @@ There is no local `runBrowserTurn()` loop that intentionally opens another Tempo
 
 Therefore the repeated Electron tabs strongly suggest that the failed request is being submitted again **above that individual browser-worker run**. Identify the exact retry owner rather than inferring it from `retryable: true` alone.
 
+## Upstream `miuuyy/codex-chatgpt-web` comparison — 2026-08-12
+
+A focused review of current upstream history, issues, commits, and release state found **directly analogous second-turn failures and several important fixes**, but no current drop-in upstream patch that can simply be copied into this Goose fork.
+
+### Upstream did solve an older second-turn lifecycle defect
+
+Upstream issue #41 was titled **“Second turn of conversation always become error.”** Its symptoms included a first turn that worked, a later turn that failed with ChatGPT “Something went wrong,” and broker activity around the failure.
+
+The maintainer first shipped a v1.1.3 fix so a retryable terminal ChatGPT failure was no longer cached and replayed for the rest of the local session. Upstream ultimately closed #41 in v2.0.0 after rebuilding the second-turn/long-task path around explicit browser-turn ownership. The maintainer described the important invariant as:
+
+- failed or superseded browser responses are retired before continuation starts;
+- stale/poisoned browser-turn state must not survive into the next logical turn;
+- compaction starts a fresh correctly bound browser turn rather than inheriting poisoned state.
+
+That architectural lesson is directly relevant here.
+
+### The literal old upstream reclaim implementation does NOT fit current Goose/Electron architecture
+
+An older upstream implementation (`Reclaim superseded browser turns`, commit `6152590f`) handled the then-single-surface launcher by cancelling **every** still-active browser turn whenever a different new turn started. That was correct only because one browser surface meant a new navigation physically superseded any prior turn.
+
+Do **not** port that method literally.
+
+Current `goose-chatgpt-web` intentionally supports multiple independent Electron turn surfaces and needs that concurrency for independent Goose sessions and future ChatGPT-Web subagents. A global “cancel all other active turns” rule would destroy legitimate parent/child or sibling concurrency.
+
+The applicable principle is narrower:
+
+> When a new user turn begins in one persisted Goose lineage, ensure any browser/provider turn that the same lineage has logically superseded is retired and fully detached before the new user turn takes ownership — while unrelated active lineages remain untouched.
+
+Whether that **lineage-scoped retirement** is actually the missing fix remains to be proven from a correlated reproduction. Do not implement it until the daemon has a trustworthy stable Goose-lineage identifier and the exact stale state is demonstrated.
+
+### Upstream's new-user-vs-tool-round execution-key fix is already present here
+
+Upstream later fixed turn-key semantics so that:
+
+- provider/tool-result rounds belonging to the same user instruction reuse one browser execution key;
+- adding a genuinely new user instruction produces a different execution key/new browser turn.
+
+Current `goose-chatgpt-web` already carries the evolved equivalent: `chatGptTurnExecutionKey()` includes the current user revision via `extractChatGptTurnUserRevision()`, and standalone Goose requests synthesize deterministic identity from the input prefix ending at the latest real user message. Tool-result rounds reuse that prefix; a new user message changes it.
+
+Therefore “port upstream user-input execution keys” is **not** a missing solution on current `main`. The future investigation must verify that the standalone Goose request actually reaches that code with the expected shape on turn 2.
+
+### Upstream stale broker-handle replay fix is already present here
+
+Upstream commit `3b9bb54e` strips `turn_*` / `binding_*` handles from accumulated context before replaying prior conversation into a new ChatGPT Temporary Chat. The reason is that a model can otherwise copy a handle belonging to a finished turn and bind itself to dead authority.
+
+Current `goose-chatgpt-web` already has `withoutRetiredTurnHandles()` in `prompt.ts` and applies it to the serialized context envelope. Do not rediscover or re-port this fix.
+
+### Upstream broker-lifetime fix is already present here
+
+Upstream commit `010028ba` made the turn-broker endpoint live for the runtime's lifetime rather than creating its socket only when a turn first registers. Current `goose-chatgpt-web` already starts `TurnBroker.forSocket(...).listen()` when the full-mode server starts.
+
+Do not treat missing broker-listener lifetime as the leading explanation without contradictory live evidence.
+
+### Upstream retryable-terminal-session retirement is already present here
+
+The v1.1.3 lesson is also already implemented in the current Goose adapter: a retryable `ChatGptWebAdapterError` retires the failed `ChatGptTurnSession` so the next native retry does not replay the same cached terminal error for the session TTL.
+
+This does not explain the current churn by itself, because the current Electron failure is post-send and the higher-level caller appears to submit the user prompt again on a new surface. The exact outer retry owner still has to be identified.
+
+### Current upstream still has an OPEN “second turn always fails” issue
+
+Upstream issue #99, **“Second turn is always a stream disconnected before completion,”** remains open. Its reporter likewise says the first run works and the second does not.
+
+Upstream initially attributed that reporter's failure to large continuation prompts corrupting at a ChatGPT Lexical composer chunk boundary. v2.1.5 and v2.1.8 introduced progressively stronger prompt insertion/caret handling. Draft PR #106 continues that work with transactional chunk insertion, exact readback, caret re-anchoring, and abort propagation.
+
+That work is worth tracking, but it is **not sufficient evidence for this Goose failure**:
+
+- the upstream prompt-attachment defect occurs before send when the composer does not preserve the exact long prompt;
+- the current Goose/Electron reproduction visibly sent the continuation, performed meaningful reasoning/shell inspection, reached Goose Native, and only then entered control-loss/replay churn.
+
+So do not copy the v2.1.8 / PR #106 long-prompt patch as the continuation fix unless a local failing trace specifically dies in `prompt_attachment` with the same expected/actual/common-prefix evidence.
+
+### Upstream applicability conclusion
+
+Current upstream provides an important **design clue**, not a ready-made patch:
+
+```text
+native Codex lesson:
+new logical user turn
+  → old superseded turn for that task is retired
+  → new browser turn owns clean authority/state
+
+Goose adaptation required:
+new user turn in Goose session/lineage A
+  → retire only superseded state belonging to lineage A
+  → do NOT disturb concurrent Goose lineage B / child agents
+  → start clean browser turn for A
+```
+
+The first implementation question is therefore not “which upstream commit do we cherry-pick?” It is:
+
+> **What stable, trustworthy Goose-session/lineage identity reaches the Responses daemon on ordinary full-mode turns, and does turn 1 remain registered/active under that lineage when turn 2 begins?**
+
+Inspect request headers/metadata and Goose 1.45 behavior before inventing a lineage key. If Goose already supplies an authenticated/structural session ID, use that. Do not derive authority from prompt text or globally serialize the browser.
+
 ## Strongest current fault-boundary hypothesis
 
 The transport-independent evidence suggests investigating the shared path first:
@@ -284,7 +379,7 @@ Do not introduce generic retries to hide the defect.
 
 Rank only after a correlated reproduction.
 
-1. **Shared continuation identity mismatch.** The second Goose user turn carries metadata/history that makes the daemon associate it with the wrong previous logical browser turn or provider-round lifecycle.
+1. **Shared continuation identity mismatch or missing lineage retirement.** The second Goose user turn creates a fresh execution key but the daemon may not explicitly retire superseded state belonging to the same persisted Goose lineage before the new turn starts.
 2. **Completed-turn cleanup/lifetime defect common to both transports.** State from turn 1 remains active/wedged and poisons turn 2; manual browser cleanup allows a clean fresh session to work.
 3. **Goose Native capability/broker lifetime mismatch on later user turns.** Turn-scoped authority from the new turn does not bind cleanly after the prior turn lifecycle.
 4. **Higher-level replay of an already-sent Electron request.** The Electron 502 is marked retryable, causing repeated fresh surfaces after the first continuation attempt has materially executed.
@@ -321,6 +416,7 @@ Do not solve this with:
 - generic retry loops;
 - forcing browser-conversation reuse;
 - globally serializing Electron;
+- globally cancelling every other browser turn when one Goose session advances;
 - restoring managed Chrome as the solution;
 - moving Goose session ownership into the bridge;
 - weakening Goose Native turn-token/capability isolation;
