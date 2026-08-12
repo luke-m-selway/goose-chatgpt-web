@@ -14,9 +14,31 @@ Status: **current/proven**, with one named validation gap.
 - Ordered macOS autostart is implemented with one login-visible coordinator that invokes canonical `lifecycle start`; daemon/tunnel launchd definitions live under the runtime home and remain launchd-supervised.
 - The earlier failed in-task lifecycle/autostart proof was self-interference from the active BrowserHost-backed turn, not a general Electron regression.
 
-Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item, but Goose Control is no longer deferred behind additional Electron reliability work.
+Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item.
 
-## Active next milestone — Goose Control first proof
+## Active focused qualification — ChatGPT-Web subagents under Electron
+
+Status: **active; recursive ChatGPT-Web children are not yet proven**.
+
+The current Electron BrowserHost is structurally multi-turn, but parent → Goose-native delegate → ChatGPT-Web child has not yet been live-qualified under Electron.
+
+The first ad-hoc child attempt was blocked by ChatGPT/OpenAI's connector safety classification before the child started, so it did **not** test Electron concurrency. Historical managed-Chrome evidence already proves Goose-native delegation from ChatGPT-Web parents and also records intermittent connector-side safety blocking.
+
+Next action: run the smallest named-source Summon proof using a disposable Goose recipe that selects `custom_chatgpt_web__local_1` / `chatgpt-web/medium`, with the parent generating only `delegate(source: "<name>")`. Make no transport code change before that test.
+
+Qualification target if the ladder stays clean:
+
+1. parent + one ChatGPT-Web child;
+2. genuine parent/child overlap;
+3. parent + two parallel ChatGPT-Web children — intended normal maximum;
+4. one child with harmless read-only Goose Native tool authority;
+5. optionally parent + three children as rare capacity.
+
+Do not optimize for the BrowserHost five-tab safety ceiling and do not claim a higher concurrency level than was live-proven.
+
+See [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) for the evidence matrix, failure classification, proof ladder, and qualification log.
+
+## Active product milestone — Goose Control first proof
 
 Status: **active; not implemented yet**.
 
