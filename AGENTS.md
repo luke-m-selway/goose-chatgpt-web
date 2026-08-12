@@ -11,6 +11,7 @@ Before architecture, lifecycle, BrowserHost, tunnel, or Goose Control work, read
 3. `docs/runtime-lifecycle.md`
 4. `docs/roadmap.md`
 5. `docs/goose-control-plan.md` when the task concerns Goose Control
+6. `docs/chatgpt-web-subagents.md` when the task concerns ChatGPT-Web subagents or BrowserHost concurrency qualification
 
 Current documentation outranks historical roadmap material and draft PR designs. Draft PR #25 and PR #26 are design inputs only after the documentation reconciliation on current `main`.
 
@@ -57,5 +58,5 @@ Use the canonical lifecycle entry point rather than reconstructing startup from 
 
 ## Delegation
 
-- Until BrowserHost concurrency is explicitly qualified for a task, avoid parallel ChatGPT-Web child fan-out under the managed browser host.
+- Until the proofs in `docs/chatgpt-web-subagents.md` explicitly qualify a concurrency level, avoid parallel ChatGPT-Web child fan-out under the Electron BrowserHost and do not claim structural support as a live proof.
 - When delegating to a non-ChatGPT/free worker, name the intended provider/model explicitly so it does not inherit ChatGPT-Web transport by accident.
