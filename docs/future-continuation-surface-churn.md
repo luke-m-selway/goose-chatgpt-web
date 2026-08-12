@@ -1,12 +1,53 @@
-# Future investigation — continuation surface churn after post-send control failure
+# Future investigation — cross-transport Goose continuation failure and retry churn
 
 Status: **deferred reliability investigation; documentation/design only.**
 
-Captured from a live ordinary-Goose / ChatGPT-Web failure on **2026-08-12** while Goose was being used for Goose Control work. This note exists so the next dedicated reliability chat can start from the observed production-path failure rather than rediscovering earlier continuation, Electron, or managed-Chrome history.
+Captured from live ordinary-Goose / ChatGPT-Web failures and historical user observation on **2026-08-12**. This note exists so the next dedicated reliability chat starts from the actual repeated failure pattern rather than treating it as an Electron-only regression.
 
-## User-visible failure
+## Critical historical correction
 
-A follow-up prompt in an existing Goose session failed with:
+The important new evidence is that **ordinary follow-up prompts in the same Goose chat have never been reliably successful in this project**, including under the previous managed-Chrome transport.
+
+Observed user-level pattern across both browser transports:
+
+```text
+fresh Goose chat, first prompt
+  → works
+
+same Goose chat, second/follow-up prompt
+  → fails
+
+close the stuck browser tab manually
+  → start a completely fresh Goose chat
+  → first prompt works again
+```
+
+Therefore the current Electron failure must **not** be framed primarily as an Electron continuation bug.
+
+The common denominator is the shared Goose → custom Responses provider → Responses daemon / logical-turn / Goose Native continuation path. Electron makes the failure much more visible because its task-bound surfaces can be watched as they overlap, close, and reopen, but managed Chrome exhibited the same user-facing inability to continue a Goose conversation.
+
+This materially lowers the probability that Electron `WebContentsView` lifecycle is the root cause and raises the priority of investigating shared continuation/session identity, broker/capability lifetime, request retry semantics, and stale browser-turn state common to both transports.
+
+## Reconcile this with earlier narrow continuation proofs
+
+Current documentation records narrow dependent `--resume` proofs as having passed at specific checkpoints. The user's broader operational evidence now conflicts with treating continuation as generally qualified.
+
+Do not erase the narrow proofs, but do not let them outrank the repeated real workflow evidence either.
+
+The future investigation must determine exactly what differed between:
+
+- the earlier named-session / separate `--resume` proof shape;
+- normal interactive or ACP-driven second prompts in an existing Goose session;
+- managed Chrome versus Electron;
+- plain model-only continuation versus a follow-up that reaches `Goose Native` or other tools.
+
+Until that discrepancy is explained, the safe status is:
+
+> **Fresh first turns are reliable enough for use; general same-session follow-up continuation is not qualified and has repeatedly failed in real use across both managed Chrome and Electron.**
+
+## Current Electron reproduction
+
+While Goose was being used for Goose Control work, a follow-up prompt in an existing Goose session failed with:
 
 ```text
 Request failed: Responses API failed: Object {"message": String("ChatGPT browser/CDP control path became unresponsive after the message was sent."), "type": String("server_error"), "code": String("chatgpt_browser_control_unresponsive")}.
@@ -15,11 +56,11 @@ Please retry if you think this is a transient or recoverable error.
 
 The failure happened **after the follow-up message had been sent to ChatGPT**.
 
-## Browser behavior observed live
+### Browser behavior observed live
 
-The Electron BrowserHost window showed a repeatable sequence during the failed continuation:
+The Electron BrowserHost window showed a repeatable sequence:
 
-1. the follow-up Goose prompt caused another ChatGPT Temporary Chat surface/tab to appear while a prior Electron task tab was still visible;
+1. the follow-up Goose prompt caused another ChatGPT Temporary Chat surface/tab to appear while a prior task tab was still visible;
 2. the new tab contained the actual follow-up prompt and ChatGPT began acting on it;
 3. ChatGPT reached the `Goose Native` connector and attempted to inspect/use its capabilities;
 4. the ChatGPT UI displayed:
@@ -30,32 +71,48 @@ The Electron BrowserHost window showed a repeatable sequence during the failed c
    This app returned no data.
    ```
 
-5. that browser tab was then closed;
+5. that browser tab closed;
 6. another fresh Temporary Chat tab opened and replayed the same follow-up work;
-7. the close → fresh-tab → replay pattern repeated until the Responses request ultimately surfaced `chatgpt_browser_control_unresponsive`.
+7. the close → fresh-tab → replay pattern repeated until the Responses request surfaced `chatgpt_browser_control_unresponsive`.
 
-A screenshot captured one of the replayed tabs. The assistant text visible immediately before the failed connector result was conceptually:
+A screenshot captured one replayed tab after ChatGPT had already performed a shell inspection of the Day Shift repository and produced visible reasoning, demonstrating that the follow-up attempt had progressed materially before the failure/replay cycle.
 
-> I’m going to inspect the available Goose Native capabilities first, then continue the existing Day Shift session without making code changes.
+The important defect is therefore **not** simply “a second tab exists.” A fresh Temporary Chat for a later logical Goose user turn is compatible with the intended architecture. The defect is that same-session follow-up enters an unhealthy lifecycle: prior/new work overlaps or remains retained, a sent prompt is replayed, Goose Native can return no data, and the request eventually fails.
 
-The key evidence is not merely that a new Electron tab existed. The current architecture intentionally allows a fresh ChatGPT Temporary Chat for a new logical Goose user turn. The suspicious behavior is the **surface overlap/churn plus repeated replay of the same follow-up request after a post-send failure**, followed by `Goose Native` returning no data.
+## Fresh-chat recovery evidence
 
-## Important continuation invariant
+After the stuck browser tab is manually closed, a **new Goose chat** can submit its first ChatGPT-Web prompt successfully.
 
-Do **not** “fix” this by forcing physical reuse of the previous ChatGPT browser tab/chat.
+This is a strong discriminator:
 
-The already-proven Goose continuation model is:
+- account authentication is still valid;
+- ChatGPT itself is still reachable;
+- the daemon/browser stack is not globally dead;
+- a clean fresh-session/first-turn path can recover immediately;
+- the failure is activated by the continuation path or state retained from the prior Goose session/turn.
+
+A future test should also check a case not yet established by the current evidence:
+
+> after manually cleaning up the stuck browser tab, can the **same persisted Goose session** successfully continue, or does only a brand-new Goose session recover?
+
+That A/B sharply separates stale browser-turn state from persisted Goose/session/continuation metadata.
+
+## Architectural invariant
+
+Do **not** solve this by forcing physical reuse of one ChatGPT browser conversation across Goose user turns.
+
+The intended architecture remains:
 
 ```text
 persisted Goose session
-  → later Goose user turn / --resume
+  → later Goose user turn
   → Goose supplies durable accumulated context
   → provider may use a fresh ChatGPT Temporary Chat surface
 ```
 
-Goose is the durable conversation source of truth. A fresh browser surface for a later Goose user turn is expected.
+Goose should remain the durable conversation source of truth.
 
-The investigation must instead determine why the second turn becomes unhealthy, why prior/new surfaces overlap or churn, and what component reissues the failed request.
+What is **not** currently proven is that the implementation correctly maps later Goose turns onto fresh provider/browser turns while preserving the right logical session context, turn metadata, tool authority, and cleanup semantics.
 
 ## Current code evidence on main
 
@@ -66,162 +123,195 @@ Baseline when this note was created:
 Reconcile runtime and Goose Control documentation
 ```
 
-### Post-send browser-control liveness
+### Electron-only post-send liveness symptom
 
 `src/adapters/chatgpt-web/control-liveness.ts` currently probes browser control after submission with:
 
-- probe interval: 5 seconds;
-- each probe timeout: 3 seconds;
+- interval: 5 seconds;
+- per-probe timeout: 3 seconds;
 - terminal threshold: 2 consecutive failed probes.
 
-The probe used by the browser worker is currently:
+The current probe is:
 
 ```ts
 page.evaluate(() => document.readyState)
 ```
 
-After two consecutive failed probes the watcher throws a retryable `ChatGptWebAdapterError`:
+After two consecutive failures the watcher throws:
 
 ```text
 status: 502
-type: server_error
 code: chatgpt_browser_control_unresponsive
 retryable: true
 ```
 
-### Browser worker does not itself replay the turn
+This explains the final Electron error, but because managed Chrome also failed at same-session continuation before this Electron liveness mechanism existed, **do not assume this watcher is the root cause**. It may be:
 
-`ChatGptBrowserWorker.run()` registers one promise per `traceId`. `runBrowserTurn()` races the response watcher against the post-send control-liveness failure. If liveness wins, the turn fails and the `finally` path attempts to release/close that turn's launcher browser connection.
+- an Electron-specific secondary failure layered on top of the older continuation defect;
+- a useful detector of a shared underlying stale/control state;
+- or an additional bug that makes the common continuation defect noisier.
 
-There is **no retry loop in `runBrowserTurn()` that intentionally opens another fresh Temporary Chat after this error**.
+### Browser worker does not itself replay the Electron turn
 
-Therefore the repeated fresh Electron tabs observed after the retryable 502 are strong evidence that the request is being submitted again **above the browser-worker turn**, for example by the Responses/provider/Goose request layer. The exact retry owner is not yet proven and must be traced rather than assumed.
+`ChatGptBrowserWorker.run()` registers one promise per `traceId`. `runBrowserTurn()` races response watching against the post-send control-liveness failure, and then its cleanup path releases/closes that turn's browser connection.
 
-### Concurrent Electron surfaces are supported intentionally
+There is no local `runBrowserTurn()` loop that intentionally opens another Temporary Chat after this error.
 
-The BrowserHost/worker design permits multiple simultaneous independent ChatGPT-Web turns (bounded by the browser-tab cap). Therefore the solution must not globally serialize Electron or remove legitimate parallelism merely to suppress this failure. Independent future subagents require real concurrent surfaces.
+Therefore the repeated Electron tabs strongly suggest that the failed request is being submitted again **above that individual browser-worker run**. Identify the exact retry owner rather than inferring it from `retryable: true` alone.
+
+## Strongest current fault-boundary hypothesis
+
+The transport-independent evidence suggests investigating the shared path first:
+
+```text
+Goose persisted session / second user turn
+        ↓
+Goose custom provider request construction
+        ↓
+Responses daemon logical turn/session identity
+        ↓
+provider-round / previous-response / native turn metadata handling
+        ↓
+turn-scoped Goose Native capability + broker lifetime
+        ↓
+common browser-worker turn lifecycle
+        ↓
+managed Chrome OR Electron surface
+```
+
+Electron-specific surface management remains relevant evidence, but it should come **after** the common layers above are checked.
 
 ## Primary diagnostic questions
 
-Answer these in order before changing behavior.
+Answer these before changing behavior.
 
-### 1. Which component reissues the continuation request?
+### 1. What is different about a second Goose user turn?
 
-Correlate one failed follow-up across:
+Compare a successful fresh first turn with the failing second turn at the wire/session level:
 
-- Goose/provider request;
-- Responses daemon request/trace identity;
-- native Goose/Codex turn metadata used for replay/continuation;
-- browser-helper request ID;
-- BrowserHost `traceId` / `surfaceId`;
-- any outer retry/backoff event.
+- Goose persisted session ID;
+- provider/model binding;
+- complete request input/history shape;
+- native turn metadata;
+- `previous_response_id` or equivalent replay metadata if present;
+- standalone identity / user-revision identity;
+- tool registry/capability creation;
+- daemon logical-turn/session lookup result;
+- trace ID and browser-turn creation.
 
-Determine whether the repeated tabs are caused by:
+The key question is whether the second **user** turn is accidentally being interpreted as:
 
-- Goose provider retries;
-- Responses-daemon retries;
-- helper/client retries;
-- another higher-level request replay.
+- continuation of the previous browser response;
+- a tool-result round belonging to the previous browser turn;
+- a new browser turn with stale previous-turn identity;
+- or another mismatched hybrid.
 
-Do not infer this only from the fact that the adapter error is marked `retryable: true`.
+### 2. Reconcile narrow `--resume` proof versus normal follow-up failure
 
-### 2. What is the exact prior-surface cleanup timeline?
+Reproduce both paths against the same revision and compare exact requests.
 
-For the first successful Goose turn and the failing second turn, record:
+Do not accept “the CLI proof passed once” as sufficient. Explain why the user-facing same-chat path differs or update the previous qualification claim.
+
+### 3. Is stale browser-turn state retained after the first successful prompt?
+
+Across both managed Chrome and Electron, record after the first completed turn:
 
 ```text
-turn terminal/completed
-→ helper connection cleanup
-→ BrowserHost turn/end or equivalent release
-→ WebContentsView removal
-→ next logical turn lease
+provider response terminal
+→ daemon logical turn/session terminal
+→ capability revoked
+→ helper/browser connection cleanup
+→ page/surface release
+→ active browser turn count returns to zero
 ```
 
-Determine whether the prior completed surface is actually leaked/delayed, or whether the visual overlap is a short legitimate handoff while cleanup finishes.
+Then send the second Goose prompt.
 
-Do not require zero milliseconds of overlap unless the ownership contract actually requires it.
+Because manually closing a stuck tab allows a fresh Goose chat to work, determine whether an old page/turn/helper reference remains live or wedged and contaminates later requests.
 
-### 3. Is the post-send `page.evaluate(document.readyState)` failure a true renderer/control loss?
+### 4. Can the same Goose session recover after manual browser cleanup?
 
-At the failing moment, correlate existing evidence without adding a second normal CDP observer:
+A/B:
 
-- BrowserHost control endpoint health;
-- exact leased surface existence;
-- renderer crash/unresponsive events if exposed;
-- helper heartbeat;
-- existing browser-turn diagnostics;
-- visible ChatGPT UI progress;
-- Goose Native connector state;
-- optional centrally owned Electron network evidence if resumed together with PR #27.
+```text
+A: fail second turn → close stuck browser tab → retry SAME Goose session
+B: fail second turn → close stuck browser tab → start NEW Goose session
+```
 
-The screenshot shows a rendered, interactive-looking ChatGPT state near the connector call. That makes a false-positive or partial-control-path failure plausible, but it is **not yet proof** that `page.evaluate` was the wrong signal.
+If A fails while B passes, prioritize persisted session/continuation metadata.
 
-### 4. Why does `Goose Native` return no data on the replayed turn?
+If both pass after cleanup, prioritize stale browser/helper/turn lifecycle.
+
+If behavior differs by managed Chrome vs Electron, isolate the transport-specific component only after the common path is understood.
+
+### 5. Why does Goose Native return no data in the Electron replay?
 
 Trace the connector/MCP/broker path without logging secret token values.
 
-Verify for each attempt:
+For each attempt verify:
 
-- a valid turn-scoped Goose Native capability exists;
-- the connector call maps to the intended active Goose turn;
-- the capability is not already revoked because the prior browser attempt failed;
-- native turn metadata/response replay identity is preserved correctly;
-- the Secure MCP Tunnel still owns a live matching MCP child;
-- the broker either returns a real tool call/result or a precise error rather than an empty/no-data response.
+- a valid turn-scoped capability exists;
+- it maps to the intended active Goose turn;
+- it has not already been revoked by a prior failed attempt;
+- native turn/replay identity is correct;
+- the Secure MCP Tunnel and MCP child are live;
+- the broker returns a real tool request/result or precise failure rather than an empty response.
 
-Determine whether `No data returned` is:
+The `No data returned` symptom may be a consequence of the continuation defect rather than its cause.
 
-- a consequence of retrying an already-failed/revoked browser turn;
-- a turn-token/binding mismatch;
-- an MCP/tunnel response failure;
-- ChatGPT connector-side behavior;
-- unrelated to the browser-control error.
+### 6. Which component reissues the Electron continuation request?
 
-### 5. Should this failure be retryable at the outer request boundary?
+Correlate:
 
-The current adapter labels `chatgpt_browser_control_unresponsive` retryable. A blind replay of a **tool-capable prompt that was already submitted** may not be semantically safe if ChatGPT or Goose Native performed side effects before control was lost.
+- Goose/provider request;
+- Responses daemon request/trace;
+- browser-helper request ID;
+- BrowserHost `traceId` / `surfaceId`;
+- adapter error;
+- any outer retry/backoff event.
 
-Investigate whether the correct contract is:
+Determine whether replay originates in Goose, the custom provider engine, the daemon, helper/client code, or another layer.
 
-- retry only before send acceptance;
-- retry after send only when execution is known idempotent and no tool side effect occurred;
-- return an explicit ambiguous/unknown-outcome error after post-send control loss;
-- or recover/reacquire the same owned surface without resubmitting the user prompt, if the existing BrowserHost/helper architecture can do so safely.
+### 7. Is post-send blind retry semantically safe?
 
-Do not choose one without tracing the real retry owner and turn state first.
+A tool-capable prompt may already have executed model work or tool side effects before control is lost.
+
+Investigate whether post-send failures should instead be classified as ambiguous/unknown outcome unless the system can prove safe recovery without resubmitting the user prompt.
+
+Do not introduce generic retries to hide the defect.
 
 ## Leading hypotheses — not conclusions
 
-Rank only after collecting correlated evidence.
+Rank only after a correlated reproduction.
 
-1. **Post-send liveness false positive / partial CDP stall.** `page.evaluate(document.readyState)` may fail twice while the renderer/UI/connector is still doing useful work, causing a healthy-enough turn to be declared dead.
-2. **Higher-level blind replay after retryable 502.** The failed request is resubmitted above the browser worker, producing a new leased surface and replaying the same already-sent prompt.
-3. **Capability lifetime mismatch on replay.** The first browser attempt fails and revokes/releases turn-scoped authority; a replay then reaches `Goose Native` with state that no longer maps cleanly to the intended Goose tool round, producing `No data returned`.
-4. **Real helper/CDP wedge during connector/tool UI transition.** The UI may remain visibly rendered while the automation/control channel itself is genuinely stuck.
-5. **Delayed prior-turn surface release.** The first tab may remain visible past logical terminal state and overlap the second turn, confusing user observation or exposing a real cleanup race.
-
-More than one may be true.
+1. **Shared continuation identity mismatch.** The second Goose user turn carries metadata/history that makes the daemon associate it with the wrong previous logical browser turn or provider-round lifecycle.
+2. **Completed-turn cleanup/lifetime defect common to both transports.** State from turn 1 remains active/wedged and poisons turn 2; manual browser cleanup allows a clean fresh session to work.
+3. **Goose Native capability/broker lifetime mismatch on later user turns.** Turn-scoped authority from the new turn does not bind cleanly after the prior turn lifecycle.
+4. **Higher-level replay of an already-sent Electron request.** The Electron 502 is marked retryable, causing repeated fresh surfaces after the first continuation attempt has materially executed.
+5. **Electron post-send liveness false positive / partial CDP stall.** This can explain Electron churn but cannot by itself explain the historical managed-Chrome inability to continue.
+6. **Separate transport-specific defects on top of one shared continuation weakness.** More than one issue may be present.
 
 ## Required evidence for the future investigation
 
-Use one minimal disposable persisted Goose session and capture a single failure with correlated IDs/timestamps.
+Use a minimal disposable persisted Goose session. Capture both turn 1 and turn 2, plus a fresh-chat control.
 
-Minimum useful evidence:
+Minimum evidence:
 
-- first-turn Goose session ID/name;
-- second-turn request identity;
-- daemon trace ID(s);
-- browser-helper request ID(s);
-- BrowserHost surface IDs and start/end timestamps;
-- post-send liveness probe failures;
-- cleanup/release events;
-- outer provider retry events;
-- Goose Native tool-call/broker lifecycle, with secrets redacted;
-- existing browser-turn diagnostic JSON/screenshots for the failing trace.
+- Goose session ID/name and provider/model;
+- exact distinction between fresh first turn and second user turn;
+- daemon logical session/turn identity decisions;
+- native turn/replay metadata with secrets redacted;
+- trace IDs;
+- active browser-turn counts before/after each turn;
+- helper/browser page or surface lifecycle timestamps;
+- Goose Native capability/broker lifecycle;
+- retry events;
+- existing diagnostics/screenshots;
+- fresh new Goose chat control after manual cleanup.
 
-Prefer existing structured logging/diagnostics. Add narrowly scoped correlation logging only if the current evidence cannot answer the ownership question.
+Where practical, run the same minimal two-turn test under both managed Chrome and Electron so the first divergence point is visible.
 
-Do **not** add a second Playwright/CDP observer as a normal diagnostic dependency. Previous Electron qualification showed that extra observers can change the failure being investigated.
+Do not add a second Playwright/CDP observer as a normal diagnostic dependency.
 
 ## Repair constraints
 
@@ -229,70 +319,69 @@ Do not solve this with:
 
 - arbitrary sleeps;
 - generic retry loops;
-- globally disabling the post-send liveness watcher;
-- forcing all Electron turns to serialize;
-- persistent reuse of one ChatGPT browser conversation across Goose user turns;
-- restoring managed Chrome;
-- moving Goose session ownership into the browser bridge;
-- moving daemon/tunnel ownership into Electron;
+- forcing browser-conversation reuse;
+- globally serializing Electron;
+- restoring managed Chrome as the solution;
+- moving Goose session ownership into the bridge;
 - weakening Goose Native turn-token/capability isolation;
-- swallowing a post-send ambiguous failure and claiming success.
+- swallowing ambiguous post-send failures;
+- redesigning Goose Control around the bug.
 
-Any repair must preserve legitimate concurrent surfaces for independent Goose turns/subagents.
+The repair must preserve deliberate independent-turn concurrency for future ChatGPT-Web subagents.
 
 ## Qualification ladder after a fix
 
-### A. Plain continuation
+### A. Fresh first-turn control
 
-Use a named persisted ordinary Goose session:
+A new Goose session completes one ordinary ChatGPT-Web prompt.
 
-1. first prompt returns a known value;
-2. separate later `--resume` asks a dependent question;
-3. dependent answer proves Goose context continuity.
+### B. Plain same-session follow-up
 
-Require:
-
-- no repeated surface replay/churn;
-- no `chatgpt_browser_control_unresponsive`;
-- previous terminal surfaces are released according to the documented BrowserHost contract;
-- a fresh Temporary Chat for the new logical Goose turn is accepted as normal.
-
-### B. Three consecutive dependent Goose turns
-
-Run first turn + two later dependent resumptions.
-
-Require each logical user turn to complete exactly once from Goose's point of view, with no accidental duplicate prompt execution.
-
-### C. Tool-capable continuation
-
-Repeat using one harmless Goose Native read-only/tool action in the continued turn.
+In that same Goose session, send a second dependent user prompt through the normal user-facing path that historically fails.
 
 Require:
 
-- real connector result;
-- no `No data returned`;
-- correct turn-scoped authority;
-- no retry replay after send.
+- correct dependent answer;
+- no stale prior browser turn;
+- no duplicate prompt execution;
+- no retry churn;
+- clean terminal browser/helper state.
 
-### D. Original Goose Control workload
+### C. Three consecutive same-session turns
 
-Only after A–C pass, retry the workflow that originally exposed this failure.
+Run first turn + two later dependent turns. Each logical user prompt must execute exactly once.
 
-Goose Control itself is not the transport fix; it is a useful realistic continuation workload that happened to reveal the provider/browser defect.
+### D. Compare CLI `--resume` and normal session continuation
 
-### E. Concurrency regression check
+If both are distinct product paths, prove both and document the difference. If they should be equivalent, make them converge on the same reliable provider contract.
 
-After fixing continuation reliability, separately confirm that two intentionally independent ChatGPT-Web turns can still overlap. Do not let a continuation fix accidentally destroy the BrowserHost's deliberate bounded concurrency needed for future ChatGPT-Web subagents.
+### E. Tool-capable continuation
+
+Use one harmless Goose Native read-only/tool action on a later same-session turn.
+
+Require a real result, correct turn-scoped authority, and no `No data returned`.
+
+### F. Recovery behavior
+
+After an intentionally failed/aborted turn, prove the same persisted Goose session can either recover safely or fails with an explicit documented terminal-session state. A brand-new Goose chat must remain able to work without manual process repair.
+
+### G. Original Goose Control workload
+
+Only after A–F pass, retry the workload that exposed the bug.
+
+### H. Concurrency regression check
+
+Confirm two intentionally independent ChatGPT-Web turns can still overlap. Do not “fix” continuation by destroying bounded multi-surface support.
 
 ## Relationship to other work
 
-- **PR #27** (`future Electron turn observability`) is broader and may provide useful renderer/network evidence. This continuation failure is specific enough to own its own diagnosis and acceptance proof.
-- **PR #28** is naming/documentation planning only and must not be used to mix mechanical renaming into this reliability fix.
-- **Goose Control** belongs in Day Shift. The failure occurred while working on Goose Control, but the defect is in the `goose-chatgpt-web` provider/browser continuation path.
-- **ChatGPT-Web subagent qualification** should remain separate. A fix here must preserve intentional multi-surface concurrency rather than serializing the BrowserHost.
+- **PR #27** is broader Electron observability hardening. It may help explain Electron-specific liveness/churn but cannot own the cross-transport continuation root cause by itself.
+- **PR #28** is naming/documentation planning; do not mix naming migration into this reliability fix.
+- **Goose Control** belongs in Day Shift. It exposed the defect but should not work around it.
+- **ChatGPT-Web subagent qualification** remains separate and depends on preserving intentional concurrency after continuation is repaired.
 
 ## Stop boundary
 
-This document does not authorize implementation from an active ChatGPT-Web turn that would need to replace/restart the same BrowserHost/daemon carrying that turn.
+This document does not authorize implementation from an active ChatGPT-Web turn that would need to replace/restart the same daemon/browser runtime carrying that turn.
 
-A future planning chat should first inspect the current local runtime/log evidence and identify the exact retry owner. If the repair requires changing/restarting the live ChatGPT-Web transport, use an independent provider/specialist session for that implementation/proof boundary.
+A future planning chat should first identify the first common divergence between successful fresh turn and failing second user turn. If repair requires changing/restarting the live ChatGPT-Web transport, use an independent provider/specialist session for implementation and proof.
