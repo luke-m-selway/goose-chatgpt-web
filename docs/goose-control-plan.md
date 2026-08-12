@@ -2,11 +2,12 @@
 
 Status: **auxiliary design note / deferred; not an active implementation milestone**  
 Captured: **2026-08-10**  
-Purpose: preserve the design discussion so a future dedicated chat can resume from this point without reconstructing the architecture from memory.
+Last scoped: **2026-08-11**  
+Purpose: preserve the smallest Goose-native design for removing the manual Planner↔Goose clipboard relay.
 
-## Why this exists
+## Goal
 
-The current `goose-chatgpt-web` workflow proves an important direction successfully:
+`goose-chatgpt-web` already proves the execution direction:
 
 ```text
 Goose
@@ -16,19 +17,30 @@ goose-chatgpt-web
 ChatGPT Web
 ```
 
-ChatGPT Web can therefore act as the main model/provider inside an ordinary Goose session while Goose owns the conversation, tools, local execution, delegation, approvals, and recipes.
+Goose remains the harness: it owns conversation state, tools, local execution, approvals, delegation, recipes, provider configuration, and session persistence.
 
-The remaining usability problem is the manual planning/execution boundary. Today Luke often uses a separate ChatGPT planning conversation to reason about architecture and decide the next step, then manually copies a generated prompt into the correct Goose conversation, waits for Goose, copies Goose's result back into ChatGPT, and repeats.
+The remaining usability problem is the planning/execution boundary. Luke often reasons in a separate persistent ChatGPT planning conversation, then manually copies a bounded instruction into Goose and later copies Goose's result back into the Planner.
 
-The intended permanent experience should not require that clipboard relay.
+**Goose Control** removes only that human transport layer.
 
-This document records an **intermediate solution** called **Goose Control**: keep the Planner exactly where it is — a persistent ChatGPT conversation — but give that Planner a narrow connector that can send work directly to Goose sessions and retrieve their results.
+First useful experience:
 
-The initial goal is not full autonomous orchestration. It is simply to remove the human transport layer between Planner and executor.
+```text
+Luke ↔ ChatGPT Planner
+          │
+          │ Goose Control
+          ▼
+     approved Goose session
+          │
+          ▼
+     normal Goose execution
+```
 
-## Canonical architectural roles
+Luke should not need to copy either prompts or results or remember raw Goose session IDs.
 
-Use the **system-role names** below as the canonical technical vocabulary throughout this project:
+## Canonical roles
+
+Use these technical names:
 
 ```text
 Luke / User
@@ -39,9 +51,7 @@ Session Guardian
 Goose Control
 ```
 
-Corporate titles are explanatory analogies only. They are useful for describing responsibility boundaries, but they are **not** architecture names and must not be read as a literal reporting org chart.
-
-Approximate analogy:
+Corporate titles are analogy only:
 
 ```text
 Luke / User   ≈ CEO / owner / final authority
@@ -50,92 +60,52 @@ Orchestrator  ≈ COO / operational manager
 Workers       ≈ execution teams
 ```
 
-The actual system flow may therefore be `Luke → Planner → Orchestrator → Workers` even though a real-world COO would normally report directly to a CEO rather than through a Chief of Staff. That flow is a software workflow and context boundary, not a corporate reporting claim.
+Do not derive software authority or routing rules from that analogy.
 
-## Desired user experience
+## Core boundary — Goose, not the browser host
 
-Current flow:
+**Goose Control addresses Goose sessions, not ChatGPT browser sessions.**
 
 ```text
 Luke
-  ↓
+  ↕
 ChatGPT Planner
-  ↓ generates paste-ready prompt
-Luke copies prompt
-  ↓
+  │
+  │ separate Goose Control MCP app
+  ▼
+Secure MCP Tunnel
+  │
+  ▼
+Goose Control gateway
+  │
+  │ authenticated loopback ACP
+  ▼
+goose serve
+  │
+  ▼
 Goose session
-  ↓ runs task
-Luke copies result
-  ↓
-ChatGPT Planner
-  ↓ assesses result / generates next prompt
+  │
+  ├── tools / approvals / delegation / Workers
+  │
+  └── provider
+        │
+        └── ChatGPT Web
+              │
+              └── browser host
+                    ├── managed Chrome (legacy)
+                    ├── Electron Chromium
+                    └── future qualified host
 ```
 
-Goose Control MVP:
+The managed-Chrome → Electron migration therefore does not redefine Goose Control.
 
-```text
-Luke
-  ↓
-ChatGPT Planner
-  ↓ Goose Control
-relevant Goose session
-  ↓ runs task
-Goose Control
-  ↓
-ChatGPT Planner
-  ↓ assesses result / sends next instruction
-```
+Do not make Goose Control depend on Electron window IDs, Playwright pages, CDP targets, ChatGPT URLs, browser-helper state, or browser-host process identity.
 
-Luke should no longer need to:
-
-- copy prompts into Goose;
-- copy Goose output back into ChatGPT;
-- remember Goose session IDs;
-- decide whether a response belongs in an existing task session or a fresh one once that policy can be encoded deterministically.
-
-For the first asynchronous version, the only unavoidable manual action may be a tiny follow-up message in the ChatGPT planning conversation after Goose has finished, such as `check`. That new ChatGPT turn gives the Planner an opportunity to call Goose Control, retrieve the completed job, assess it, and continue. If Luke sends any normal message instead, the Planner can opportunistically check pending jobs during that turn.
-
-The connector alone should **not** be expected to wake a completed ChatGPT conversation spontaneously when Goose finishes. Removing that final nudge belongs to a later event-driven orchestration layer.
-
-## Architectural principle
-
-**Do not merge the Planner and executor merely to eliminate copy/paste.**
-
-The planning conversation is valuable precisely because it stays separate from long implementation turns, tool output, logs, retries, and code context. Goose Control should preserve that separation while removing the manual transport boundary.
-
-Conceptually:
-
-```text
-                 Luke
-                   │
-                   ▼
-        ┌─────────────────────┐
-        │ Persistent Planner  │
-        │ ChatGPT Web / High  │
-        └──────────┬──────────┘
-                   │
-              Goose Control
-                   │
-        ┌──────────┼──────────┐
-        ▼          ▼          ▼
-     Goose A    Goose B    Goose C
-  implementation review    deployment
-        │          │          │
-        └──────────┼──────────┘
-                   ▼
-             Goose Workers /
-             Day Shift routes
-```
-
-The Planner remains the strategic interface. Goose sessions remain the execution contexts.
+The repository's `launcher/electron/control-server.cjs` belongs to the browser/runtime reliability plane. It is **not** Goose Control.
 
 ## Goose Control is not Goose Native
 
-Keep the control plane separate from the existing Goose Native connector.
-
 ### Goose Native
-
-Purpose:
 
 ```text
 active ChatGPT-Web provider turn
@@ -145,567 +115,484 @@ Goose Native connector
 Goose-owned tools / delegation for that turn
 ```
 
-It is an execution-time bridge tied to the currently active Goose turn and its tool/broker semantics.
+The current `goose-native` MCP contract is intentionally scoped to one active outer-harness turn. Its tools require the random `turn_token` supplied to that provider turn and route through the turn broker. Authority expires with the turn.
 
 ### Goose Control
 
-Purpose:
-
 ```text
-persistent ChatGPT planning conversation
+persistent ChatGPT Planner
   ↓
 Goose Control
   ↓
-Goose session management / job submission / result retrieval
+approved Goose sessions / jobs
 ```
 
-It is a management interface across Goose sessions.
+The Planner is not inside an active Goose provider turn and should not possess a Goose Native turn token.
 
-Do not give Goose Control arbitrary shell, file-editing, browser-control, credential, or process-management capabilities merely because Goose Native or Goose itself has those capabilities. Goose Control should remain a narrow session/job API; the receiving Goose session retains responsibility for its own normal permissions and tools.
+Therefore **Goose Control should be a separate logical MCP app/server identity**, not extra tools added to the existing `goose-native` MCP server.
 
-## Proposed connector boundary
+Reuse suitable infrastructure — especially the private Secure MCP Tunnel pattern — but do not reuse Goose Native's turn-token authority semantics or public tool contract. This keeps the management plane least-privileged and prevents cross-session authority from leaking into ordinary ChatGPT-Web provider turns.
 
-The preferred shape is a small MCP/custom-app style control service reachable by the ChatGPT Planner through the same general private-connector/tunnel pattern already proven in this project.
+## Documentation-derived design decisions — Goose 1.45.0
 
-The exact transport should be re-evaluated when implementation begins, but the logical API should remain narrow.
+The installed Goose version is 1.45.0. Review of that exact tag answers most of the questions that were previously left for a development spike.
 
-### Minimum useful session operations
+### 1. ACP is the native client/control boundary
+
+Goose's own custom-distribution architecture places CLI, Desktop, and custom clients above `goose serve (ACP)`, with Goose Core below it.
+
+Goose Desktop 1.45.0 itself starts `goose serve` on loopback with a generated secret and connects to its `/acp` endpoint.
+
+**Decision:** use `goose serve` ACP as the Goose Control backend. Do not create another Goose session API and do not use browser control as a session API.
+
+### 2. ACP can address ordinary persisted Goose sessions
+
+In Goose 1.45.0:
+
+- the ACP session ID maps directly to a row in Goose's `sessions` store;
+- ACP `session/list` deliberately includes legacy `User` sessions as well as `Scheduled` and `Acp` sessions;
+- ACP `session/load` looks up the supplied ID through Goose's normal `SessionManager`;
+- CLI resume also resolves ordinary sessions through that same `SessionManager`;
+- loading a persisted session preserves its stored provider/model when those values already exist.
+
+This is enough to settle the architecture question: **ACP is designed to load the same persisted Goose session identity used outside ACP.**
+
+A future live check against Luke's exact long-lived ChatGPT-Web-backed session remains worthwhile, but only as an integration smoke test — not an architecture/research spike.
+
+#### Working-directory safety
+
+`session/load` accepts a `cwd`, and Goose may update the persisted session working directory if the supplied value differs from the stored value.
+
+ACP `session/list` returns the session's working directory. Therefore Goose Control should load an existing target using its **persisted/listed cwd**, not a Planner-supplied cwd. The Planner should not be allowed to mutate an existing target's working directory through `submit_task`.
+
+### 3. Native ACP `session/prompt` should execute the task
+
+Goose 1.45.0 already provides the execution lifecycle Goose Control needs:
 
 ```text
-list_sessions(...)
-get_session(session_id)
-start_session(...)
+session/prompt
+  ↓
+create active run + CancellationToken
+  ↓
+Agent.reply(...)
+  ↓
+stream normal Goose messages/tool activity
+  ↓
+persist messages through SessionManager
+  ↓
+EndTurn | Cancelled
 ```
 
-Potential inputs for `start_session`:
+Only one active prompt run is allowed per session. A second run fails closed as busy.
+
+**Decision:** do not implement a second asynchronous execution engine inside Goose and do not expose the hidden Orchestrator merely to send a message.
+
+The Goose Control gateway should start a normal ACP `session/prompt` in a background task that it owns. `submit_task` returns a Goose-Control `job_id` immediately while that background task continues awaiting the ordinary ACP turn.
+
+The custom asynchronous concept is therefore only the **Planner-facing job handle**. Goose execution itself remains entirely native.
+
+### 4. Cancellation maps directly to ACP `session/cancel`
+
+Goose 1.45.0 tracks the active run's `CancellationToken`. ACP cancellation finds that active run by session ID and cancels its token.
+
+**Decision:**
 
 ```text
-project
-working_dir
-purpose
-name
-provider/model policy if explicitly allowed
+cancel_job(job_id)
+  ↓ resolve job → session
+ACP session/cancel
 ```
 
-The Planner should not need to know raw IDs most of the time.
+Never implement cancellation as process termination, Electron shutdown, Chromium shutdown, Goose restart, or browser-host restart.
 
-### Primary job operations
+A future live smoke test should verify that the ChatGPT-Web provider bridge responds cleanly to this normal Goose cancellation path, but the control-plane mapping is settled.
 
-Prefer asynchronous semantics from the start:
+### 5. Fresh sessions should use ACP `session/new`
+
+Goose 1.45.0 `session/new` already creates a normal persisted session through `SessionManager`, validates an absolute cwd, loads extensions/recipes, resolves provider/model configuration, activates the ACP session, and returns the new session ID.
+
+**Decision for the later `fresh` mode:** use native ACP `session/new`, not Orchestrator `start_agent` and not a custom session constructor.
+
+Goose Control should map a small **server-side approved profile** to cwd/recipe/provider policy. The Planner should not directly choose an arbitrary filesystem path or arbitrary provider/model.
+
+Fresh creation is still unnecessary for the first MVP; continuation against one approved existing session proves the clipboard-free loop with less authority.
+
+### 6. Same-session concurrency needs no custom queue
+
+Goose's ACP server already rejects a second active prompt for the same session.
+
+**Decision:** surface this as `busy`/conflict and fail closed. Do not add a Goose-Control queue until real use demonstrates a reason to override the native one-run-per-session model.
+
+### 7. Goose remains the conversation source of truth
+
+During `session/prompt`, Goose persists the conversation through its normal `SessionManager`. ACP session load/replay can reconstruct user-visible history, including message identity/metadata.
+
+The ACP server's active-run registry, however, is in memory and does not provide Goose Control's caller-generated `request_id` or at-most-once semantics.
+
+**Decision:** Goose Control owns only a tiny durable correlation/idempotency ledger. It must not duplicate the Goose conversation or modify Goose's private session database schema.
+
+Minimum durable record:
 
 ```text
-send_message_async(session_id | target, message, metadata?)
-  → job_id
+request_id        # unique caller idempotency key
+payload_hash      # reject same id with different instructions
+gateway_job_id
+target_alias
+session_id
+state
+submitted_at
+completed_at?
+final_message_id?
+error?
+```
+
+Where practical, recover the canonical result from Goose's persisted session/message rather than treating a copied result blob as a second conversation store. Caching the final projected result for convenience is acceptable, but Goose remains authoritative.
+
+### 8. Authenticated loopback ACP stays behind the gateway
+
+Goose 1.45.0 requires `GOOSE_SERVER__SECRET_KEY` for a normal `goose serve` deployment and supports authenticated ACP requests using the secret. Goose Desktop itself uses a loopback server pattern.
+
+**Decision:**
+
+- keep `goose serve` loopback/private;
+- authenticate gateway→Goose ACP;
+- never expose the Goose server secret to the Planner;
+- never expose unrestricted raw ACP directly through the ChatGPT connector;
+- never use `--dangerously-unauthenticated` for the real control path.
+
+The external ChatGPT-facing boundary remains the much narrower Goose Control MCP app.
+
+## Why not use the hidden Orchestrator as the transport?
+
+Goose's built-in Orchestrator is valuable for later operational management, but it is not the most native transport boundary for Goose Control.
+
+It offers session list/view/start/send/interrupt tools, but current `send_message` is synchronous and the extension carries broader orchestration semantics than the Planner connector needs.
+
+ACP is Goose's explicit client protocol, is already used by Desktop/custom clients, directly addresses persisted sessions, and already supplies prompt/cancel/session lifecycle semantics.
+
+**Decision:** ACP is the backend protocol. The future persistent Orchestrator may become a **target session behind Goose Control**, not the protocol Goose Control is built around.
+
+## Minimal Planner-facing API
+
+Keep the public MCP surface deliberately smaller than ACP:
+
+```text
+list_targets()
+
+submit_task(
+  target,
+  mode,
+  instructions,
+  request_id
+)
+  → job_id, session_id, state
 
 get_job(job_id)
-  → running | completed | failed | cancelled
+  → state, result?, error?, target/session metadata
 
-interrupt_job(job_id)
+cancel_job(job_id)
 ```
 
-A synchronous `send_message()` may be useful for very short operations, but it should not be the primary mechanism because it would tie up the Planner turn for the entire Goose execution.
-
-### Optional convenience operations
-
-Later, if clearly useful:
+For the first MVP:
 
 ```text
-list_jobs(status?)
-get_pending_jobs()
-peek_job(job_id)
-get_job_output(job_id)
-resolve_target(alias)
+mode = continuation
 ```
 
-Avoid expanding the connector into a general Goose administration API unless a concrete workflow requires it.
+`fresh` becomes available only after approved session profiles are implemented.
 
-## Async job semantics
+Do not initially expose:
 
-The key usability requirement is that the Planner is not blocked while Goose performs a long task.
+- arbitrary raw session listing;
+- arbitrary `session/new`;
+- arbitrary cwd;
+- arbitrary provider/model selection;
+- shell or file APIs;
+- browser/CDP APIs;
+- process management;
+- tunnel administration;
+- Goose lifecycle operations.
 
-Desired call:
+## Async/idempotency semantics
+
+`submit_task` must return without holding the ChatGPT Planner tool call open for the entire Goose turn.
+
+Internally:
 
 ```text
-send_message_async(
-  target = "goose-chatgpt-web:compaction",
-  message = "..."
-)
+submit_task
+  ↓ validate target + request_id
+  ↓ persist pending/running ledger entry
+  ↓ launch background ACP session/prompt
+  ↓ return job_id
+
+background task
+  ↓ collect normal ACP stream
+  ↓ record terminal state/final message identity
+
+later get_job(job_id)
+  ↓ return projected canonical result
 ```
 
-Immediate response:
+### At-most-once submission
 
-```json
-{
-  "job_id": "goose_job_0042",
-  "session_id": "20260810_7",
-  "status": "running"
-}
-```
+`request_id` is mandatory.
 
-Goose continues independently.
+If connector/tunnel/network ambiguity causes a retry, the same `request_id` and same payload must return the existing job. It must not create a second Goose prompt.
 
-A later Planner turn calls:
+The same `request_id` with materially different target/mode/instructions must fail closed.
+
+Persist the idempotency record **before** initiating the ACP prompt so a retry cannot race ahead of the ledger.
+
+## Target aliases
+
+The Planner addresses approved semantic targets, for example:
 
 ```text
-get_job("goose_job_0042")
+goose-chatgpt-web:implementation
+  → persisted Goose session ID + expected project/cwd
+
+day-shift:implementation
+  → persisted Goose session ID + expected project/cwd
 ```
 
-and receives one of:
+Required properties:
+
+- deterministic;
+- server-controlled;
+- visible project/purpose;
+- no silent guessing;
+- fail closed on unknown/ambiguous/stale mapping;
+- validate the resolved session's persisted cwd/project metadata before writing.
+
+The Planner should not need raw IDs in ordinary use.
+
+## Result projection
+
+Default `get_job` should return enough evidence for strategic reasoning without dumping operational noise:
 
 ```text
-running
-completed
-failed
-cancelled
-```
-
-For completed/failed jobs the response should include the canonical Goose result required for the Planner to judge the next step, without forcing Luke to relay it manually.
-
-## Target/session aliases
-
-A deterministic alias registry would remove most raw-session bookkeeping from the Planner conversation.
-
-Example:
-
-```text
-goose-chatgpt-web:compaction
-  → 20260810_7
-
-goose-chatgpt-web:deployment
-  → 20260810_9
-
-day-shift:groq-provider
-  → 20260811_2
-```
-
-The exact storage mechanism can remain very small initially. The important property is that aliases resolve deterministically and visibly; the model should not silently guess among several plausible sessions.
-
-The registry may eventually store:
-
-```text
-target alias
-project/repository
-session_id
-purpose
+job_id
 state
-last job id
-created/updated timestamps
+target
+session_id
+submitted_at
+completed_at?
+result?        # canonical final user-visible Goose assistant result
+error?
 ```
 
-## Continuation vs fresh session policy
+Do not return full tool logs by default.
 
-One existing planning convention should eventually become a first-class control decision rather than a manual copy/paste instruction:
+If later workflows need richer evidence, add an explicit bounded inspection operation rather than making every completed job copy the whole Goose transcript into the Planner context.
 
-```text
-CONTINUATION — use the existing agent chat/context
-```
+## Planner availability
 
-versus:
+The connector can remove prompt/output copying but cannot by itself initiate a brand-new ChatGPT Planner turn after that conversation has finished responding.
 
-```text
-FRESH CHAT — start a new agent chat/context
-```
-
-The Planner should continue a session only when the task is genuinely incremental within the same workstream. A distinct diagnostic, milestone, or problem should receive a fresh session so stale assumptions and accumulated context do not contaminate it.
-
-Goose Control can eventually encode this explicitly, for example:
+Expected intermediate UX:
 
 ```text
-submit_job(
-  target = "goose-chatgpt-web:compaction",
-  mode = "continuation",
-  ...
-)
-```
-
-or:
-
-```text
-submit_job(
-  project = "goose-chatgpt-web",
-  mode = "fresh",
-  purpose = "pinned-delegation-policy",
-  ...
-)
-```
-
-Do not let the connector automatically infer a continuation when there is meaningful ambiguity.
-
-## Planner availability and the remaining manual nudge
-
-An MCP/control connector can remove the prompt/output copying boundary, but by itself it does not provide a durable background brain that can initiate a new Planner turn after ChatGPT has already finished responding.
-
-Therefore the expected intermediate behavior is:
-
-```text
-Luke → Planner: start/continue task
-Planner → Goose Control: submit async job
-Planner → Luke: job is running
+Luke → Planner: start task
+Planner → Goose Control: submit_task(...)
+Planner → Luke: accepted / running
 
 Goose completes independently
 
-Luke → Planner: "check"  (or any new normal message)
-Planner → Goose Control: retrieve job
-Planner → evaluates result
-Planner → Goose Control: sends next step if appropriate
+Luke → Planner: any later message
+Planner → Goose Control: get_job(...)
+Planner evaluates result
+Planner → Goose Control: next continuation if appropriate
 ```
 
-This is already a large UX improvement because Luke's manual action becomes a tiny conversation nudge rather than a two-way clipboard relay.
+The Planner should opportunistically check relevant pending jobs on later normal turns. Automatic wake-up belongs to a later event-driven orchestration layer.
 
-The Planner should also opportunistically inspect relevant pending jobs whenever Luke next talks normally, so `check` is not a special command the user must remember.
+## Security / authority
 
-## What Goose Control deliberately does not solve
-
-The MVP should not pretend to provide full autonomous orchestration.
-
-It does **not** by itself solve:
-
-- automatic wake-up of the Planner when Goose completes;
-- persistent Planner/Orchestrator hierarchy;
-- autonomous multi-step review/implementation loops while Luke is absent;
-- provider/model routing policy;
-- Worker concurrency policy;
-- automatic deployment authority;
-- system-wide health supervision;
-- Session Guardian behavior;
-- arbitrary recursive subagent trees.
-
-Those can build on the same control plane later.
-
-## Security and authority model
-
-The connector should expose the minimum management authority needed by the Planner.
-
-Likely allowed:
+Allowed in the MVP:
 
 ```text
-✓ list/inspect approved Goose sessions
-✓ start an approved Goose session within configured project roots
-✓ submit a message/job
-✓ retrieve job status/result
-✓ interrupt a job/session started or explicitly managed through this control plane
+✓ list approved semantic targets
+✓ submit bounded text to an approved target
+✓ read state/result for Goose-Control jobs
+✓ cancel a Goose-Control job through ACP cancellation
 ```
 
-Likely disallowed directly through Goose Control:
+Potentially later:
+
+```text
+△ create a fresh session from an approved server-side profile
+△ inspect bounded approved session metadata
+```
+
+Disallowed directly through Goose Control:
 
 ```text
 ✗ arbitrary shell execution
 ✗ arbitrary file reads/writes
-✗ credential/keychain access
+✗ credentials/keychain access
 ✗ browser/CDP control
 ✗ broad process killing
-✗ changing tunnel identity
-✗ arbitrary provider spending
+✗ Goose-host lifecycle disruption
+✗ arbitrary cwd
+✗ arbitrary provider/model spending
+✗ tunnel administration
 ```
 
-If a task needs shell/files/tools, Goose itself performs those actions under its own configured permissions and task policies.
+If an implementation task needs shell/files/tools, the receiving Goose session uses its normal configured permissions and approvals.
 
-Use explicit project-root/working-directory validation. Fail closed on unknown aliases, ambiguous sessions, unavailable targets, and unsupported provider/model requests.
+## Longer-term Planner / Orchestrator evolution
 
-## Relationship to Goose upstream Project Palmate / hidden Orchestrator
+Do not merge Planner and Orchestrator merely to eliminate copy/paste.
 
-As of this note (2026-08-10), Goose upstream already contains a built-in **Orchestrator** platform extension introduced by upstream PR `#7999` as part of **Project Palmate**.
-
-Important observations from the then-current upstream code:
-
-- it is built into Goose core, not an external plugin;
-- it is intentionally `default_enabled: false` and `hidden: true`;
-- it can list, view, start, message, and interrupt agent sessions;
-- `start_agent` currently inherits the Orchestrator's provider/model and contains a TODO for model-tier selection;
-- `send_message` is synchronous and consumes the target agent response until completion;
-- Goose's separate Summon/subagent machinery already supports asynchronous background delegation with task IDs, status/peek, result retrieval, and cancellation.
-
-**Re-check current Goose upstream before implementing.** This is an active area and may have changed substantially.
-
-### Why not wait for or fully implement Palmate first?
-
-A mature Planner/Orchestrator system needs much more than removing clipboard relay:
-
-```text
-persistent Planner
-persistent Orchestrator
-async Planner → Orchestrator jobs
-Orchestrator task ledger
-Worker selection
-parallelism
-review loops
-authority policy
-provider/model selection
-completion events
-failure recovery
-context membranes
-durable orchestration state
-```
-
-Goose Control is intentionally much smaller. It only needs to give the existing ChatGPT Planner a reliable way to address Goose sessions, submit work asynchronously, and fetch results.
-
-This makes it a strong intermediate milestone even if Palmate later becomes the preferred native orchestration layer.
-
-## Goose Control should not be throwaway work
-
-Design the API so it can survive a later Planner/Orchestrator architecture.
-
-A generic interface such as:
-
-```text
-submit_job(target, instructions, context?, authority?)
-job_status(job_id)
-job_result(job_id)
-interrupt_job(job_id)
-```
-
-can initially mean:
-
-```text
-Planner
-  ↓
-Goose Control
-  ↓
-implementation Goose session
-```
-
-Later it can mean:
+The stable future shape can remain:
 
 ```text
 Luke / User
-  ↕
+    ↕
 Planner
-  ↓ same control interface
-persistent Orchestrator session
-  ↓
-Workers
+    │
+Goose Control
+    │
+Orchestrator        # later persistent Goose target
+    │
+Workers / Day Shift
+
+Session Guardian    # separate reliability plane
 ```
 
-The transport and session-control layer therefore remains useful; the main evolution is changing the Planner's target from direct execution sessions to a persistent Orchestrator.
+The Planner keeps strategic context. The Orchestrator, when justified by real usage, owns operational decomposition/review/Worker coordination. Goose Control's public contract does not need to change; only the target behind an alias changes.
 
-## Longer-term Planner / Orchestrator design preserved here
+## Revised implementation path
 
-The eventual preferred architecture discussed alongside Goose Control is:
+Documentation now settles the main architecture. Do **not** spend a future milestone rediscovering it.
+
+### Phase 0 — bounded native-ACP smoke test
+
+No new architecture work.
+
+Against the exact installed Goose 1.45.0 environment, prove with a harmless test target that:
+
+1. authenticated loopback `goose serve` is reachable;
+2. ACP `session/list` sees the intended ordinary `User` session;
+3. `session/load` loads it using its persisted cwd without changing provider/model;
+4. a bounded `session/prompt` appends exactly one normal turn and returns its result;
+5. a deliberately cancellable test prompt stops through ACP `session/cancel` while Goose and the ChatGPT-Web browser host remain alive.
+
+These are regression/integration checks of documented behavior, not design questions.
+
+Do not perform the cancellation test against the active Goose process/session hosting the agent running the proof.
+
+### Phase 1 — local thin gateway
+
+Implement only:
+
+- one hard-approved target alias;
+- ACP list/load/prompt/cancel client behavior;
+- tiny durable `request_id`/job ledger;
+- result projection;
+- fail-closed busy handling.
+
+No ChatGPT connector is required to prove this local layer.
+
+### Phase 2 — Planner-facing MCP capability smoke
+
+Create the separate narrow Goose Control MCP app/server identity and connect it through the private Secure MCP Tunnel pattern.
+
+Verify the actual ChatGPT account/workspace can invoke its write-capable `submit_task`/`cancel_job` actions and record what confirmation behavior applies.
+
+Do not merge these tools into `Goose Native` merely to avoid this product-surface check.
+
+### Phase 3 — one-target MVP
+
+Prove the complete clipboard-free loop:
 
 ```text
-                    Luke / User
-                        │
-                        ▼
-                ┌──────────────────┐
-                │     Planner      │
-                │ Persistent       │
-                │ ChatGPT-Web High │
-                └────────┬─────────┘
-                         │
-                  async job packet
-                         │
-                         ▼
-                ┌──────────────────┐
-                │   Orchestrator   │
-                │ Persistent       │
-                │ ChatGPT-Web High │
-                └────────┬─────────┘
-                         │
-             ┌───────────┼───────────┐
-             ▼           ▼           ▼
-        Implementer   Reviewer   Researcher
-             │           │           │
-             └───────────┼───────────┘
-                         ▼
-                      Day Shift
-                 role/model/provider
-
-              separate reliability plane
-                         │
-                         ▼
-                  Session Guardian
+Planner submit_task
+  → job_id immediately
+Goose works
+Planner later get_job
+  → canonical result
+Planner submit_task continuation
 ```
 
-The **system-role names above are canonical**. The corporate analogy is explanatory only:
+with idempotent retries and no prompt/output copying by Luke.
 
-- **Luke / User** — final authority; sets goals, priorities, constraints, and approval boundaries. Rough analogy: CEO / owner.
-- **Planner** — persistent strategic interface; stays close to Luke, discusses goals, priorities, architecture, trade-offs, and roadmap, converts approved intent into bounded job packets, and remains available for conversation while execution runs. Rough analogy: Chief of Staff / strategic adviser.
-- **Orchestrator** — persistent operational manager; decomposes jobs, chooses Workers, manages implementation/review loops, validates completion gates, and returns concise operational reports to the Planner. Rough analogy: COO.
-- **Workers** — bounded execution agents. Rough analogy: teams/employees. They should not recursively create further management layers.
-- **Session Guardian** — deterministic health/recovery plane, not an AI project manager and not part of the corporate analogy.
+### Phase 4 — approved fresh-session profiles
 
-The Planner → Orchestrator handoff is a software workflow and context membrane. It does **not** mean a COO-like role literally reports to a Chief-of-Staff-like role. Do not use the corporate analogy to derive authority or routing rules; use the canonical system roles and explicit policies instead.
+Use native ACP `session/new` behind server-side profiles. Add only the profiles real workflows require.
 
-Do not collapse the Planner and Orchestrator merely because Goose can technically delegate. A combined Planner/Orchestrator would become occupied with internal execution decisions and defeat the purpose of keeping the strategic planning conversation continuously available.
+### Phase 5 — dogfood before more orchestration
 
-### Context membranes
-
-The Orchestrator does not need the Planner's entire planning history. Prefer structured job packets:
-
-```text
-objective
-relevant background
-architectural constraints
-acceptance criteria
-authority
-budget/provider policy
-repository/working directory
-known risks
-stop conditions
-```
-
-Likewise, Workers may return large logs and implementation detail to the Orchestrator, but the Orchestrator should return to the Planner only:
-
-```text
-status
-decisions made
-material findings
-artifacts / PRs
-unresolved risks
-next recommended action
-```
-
-This protects the strategic context from operational noise.
-
-## Relative implementation scope
-
-Use this only as a qualitative comparison, not an effort estimate:
-
-```text
-Goose Control MVP                small
-Async Goose Control              small-to-medium
-Persistent Planner/Orchestrator  substantially larger
-Full autonomous system           larger again
-```
-
-The important conclusion is that **Goose Control is expected to be materially less work than completing a production-grade Palmate-style Planner/Orchestrator layer**, while delivering an immediate usability benefit.
-
-## Suggested implementation phases when this is eventually prioritized
-
-### Phase 0 — re-evaluate before coding
-
-A dedicated future chat should first inspect:
-
-1. current `goose-chatgpt-web` main and security model;
-2. current Goose session APIs / AgentManager / event bus;
-3. current Project Palmate / Orchestrator implementation;
-4. current Summon async task semantics;
-5. current ChatGPT custom-app/MCP write/action capabilities and Secure MCP Tunnel behavior;
-6. whether an existing Goose API already provides the required async session control cleanly.
-
-Do not assume this 2026-08-10 upstream snapshot is still current.
-
-### Phase 1 — read-only discovery proof
-
-Prove from the Planner connector:
-
-```text
-list approved Goose sessions
-inspect one known session
-resolve a deterministic alias
-```
-
-No writes yet.
-
-### Phase 2 — controlled send proof
-
-Add one explicit `send_message`/`submit_job` path to a known test Goose session with strict target validation.
-
-Prove the Planner can send a task without Luke copying it.
-
-### Phase 3 — async jobs
-
-Make asynchronous submission the normal path:
-
-```text
-submit → job_id immediately
-peek/status
-retrieve result
-cancel
-```
-
-Prove the ChatGPT Planner is free to continue a separate conversation while Goose works.
-
-### Phase 4 — session aliases and fresh/continuation semantics
-
-Add deterministic target aliases and enough metadata to distinguish continuation from fresh work without relying on human copy/paste conventions.
-
-### Phase 5 — real workflow dogfood
-
-Use Goose Control for actual project work for a period before adding a persistent Orchestrator.
-
-Observe which operations still require manual intervention and which decisions are repetitive enough to move into the later orchestration layer.
-
-### Phase 6 — optional Planner/Orchestrator evolution
-
-Only after real usage demonstrates the need, insert a persistent Orchestrator between the Planner and Workers, ideally reusing or extending Goose upstream Palmate/Orchestrator rather than creating an unrelated agent runtime.
+Use Goose Control for real work before adding a persistent Orchestrator, autonomous wake-ups, richer job APIs, or custom scheduling.
 
 ## MVP acceptance criteria
 
-The first useful Goose Control milestone should satisfy all of the following:
+The first useful milestone passes when:
 
-- The ChatGPT Planner can deterministically identify or create the intended Goose session.
-- The Planner can send a complete task to Goose without Luke copying/pasting anything.
-- Goose retains normal ownership of execution, tools, approvals, conversation, and delegation.
-- The Planner receives a stable job/session identifier.
-- A long Goose task can run without holding the Planner in a synchronous tool call for its entire execution.
-- On a later ChatGPT turn, the Planner can retrieve the canonical Goose result without Luke copying it.
-- The Planner can send a follow-up to the same session after assessing that result.
-- The Planner can explicitly choose a fresh session for a new workstream.
-- Unknown/ambiguous targets fail closed.
-- Goose Control itself exposes no arbitrary shell/file/credential/browser/process capability.
-- Existing Goose Native behavior is unchanged.
-- Existing Secure MCP Tunnel identity is not casually replaced as part of this feature.
+1. Planner addresses one approved semantic target.
+2. Exactly one `submit_task` instruction becomes exactly one Goose turn.
+3. Submission returns a stable `job_id` quickly.
+4. Goose retains normal ownership of conversation, tools, approvals, delegation, provider, and persistence.
+5. `get_job` later returns terminal state and the canonical result without Luke relaying it.
+6. Planner can send a continuation to the same target.
+7. Same `request_id` + same payload cannot execute twice.
+8. Same `request_id` + different payload fails closed.
+9. Same-session overlap surfaces busy/conflict rather than silently running concurrently.
+10. `cancel_job` maps to ACP cancellation and does not terminate Goose/Electron/Chromium/browser host.
+11. Existing Goose Native behavior remains unchanged.
+12. Goose Control exposes no arbitrary shell/file/credential/browser/process authority.
 
-A successful end-to-end demonstration should look like:
+## Questions documentation has now answered
 
-```text
-Luke → Planner: "continue with the next milestone"
-Planner → Goose Control: submit async task
-Goose executes
-Luke later → Planner: "check" (or asks a normal unrelated question)
-Planner → Goose Control: retrieve result
-Planner judges result
-Planner → Goose Control: send appropriate continuation
-```
+Do not reopen these without contradictory new evidence:
 
-with **zero prompt or output copying by Luke**.
+- **Backend protocol:** native Goose ACP through `goose serve`.
+- **Ordinary-session addressability:** ACP session IDs map to Goose persisted sessions; ACP list/load includes ordinary `User` sessions.
+- **Execution primitive:** native ACP `session/prompt`.
+- **Async shape:** gateway background task around ordinary ACP prompt; no second Goose execution engine.
+- **Cancellation:** ACP `session/cancel`.
+- **Same-session concurrency:** fail closed using Goose's native one-active-run rule.
+- **Fresh-session mechanism:** ACP `session/new` behind approved profiles.
+- **Conversation storage:** Goose remains authoritative.
+- **Custom state:** only a tiny Goose-Control correlation/idempotency ledger.
+- **Browser host:** below Goose Control and irrelevant to its public contract.
+- **Orchestrator:** possible later target/manager, not the Goose Control transport.
+- **Goose Native relationship:** separate logical MCP identity and authority model; reuse only suitable tunnel/plumbing.
+- **Raw ACP exposure:** no; authenticated loopback ACP stays behind the narrow gateway.
 
-## Later autonomous acceptance criterion
+## Genuine questions remaining
 
-This is explicitly **not required for the MVP**:
+### Required live checks before relying on the MVP
 
-```text
-Goose finishes
-  ↓ completion event
-Planner/orchestration process wakes automatically
-  ↓
-evaluates result
-  ↓
-sends next job
-```
+1. **Can this actual ChatGPT Planner/account/workspace invoke the separate write-capable Goose Control MCP app through Secure MCP Tunnel, and what confirmation behavior applies?**  
+   This is now a ChatGPT product-entitlement/permission check, not a Goose architecture question. Public ChatGPT documentation currently limits full custom-MCP write support by plan/workspace, while this project already has a proven private connector path. Verify the actual account/surface rather than designing around an assumption.
 
-That requires an event-driven workflow owner outside the simple request/response connector and is effectively the beginning of the future Orchestrator layer.
+2. **Does a real ChatGPT-Web-backed Goose turn cancel cleanly through the documented ACP → Goose cancellation path?**  
+   The Goose-side mapping is settled. The live test is only to verify the provider/browser bridge propagates that normal cancellation without disrupting the host.
 
-## Open questions for the future implementation chat
+### Non-blocking resilience question
 
-Re-evaluate rather than inheriting answers blindly:
+3. **What happens if the Goose Control gateway/ACP client crashes or disconnects while `session/prompt` is still running?**  
+   Normal async operation does not require a disconnect: the gateway keeps the ACP request alive in its background task. Before promising crash-surviving in-flight jobs, test whether the exact Goose/ACP transport continues or cancels an active prompt on client loss and define recovery accordingly. This is not required for the first clipboard-free MVP if gateway restart during an active job is documented as a recoverable failure boundary.
 
-1. Should Goose Control wrap Goose's existing HTTP/session API directly, or should a tiny local service own a more stable facade?
-2. Can current Goose Palmate/Orchestrator already provide asynchronous session messages by then?
-3. Should job state live in Goose, the connector service, or a tiny separate durable ledger?
-4. What is the narrowest reliable alias/target model across multiple repositories?
-5. How should the Planner discover that a job finished when Luke returns to the chat?
-6. Which connector writes need explicit user confirmation in the current ChatGPT custom-app model?
-7. How should concurrent jobs targeting the same Goose session fail or queue?
-8. What output projection gives the Planner enough evidence without unnecessarily copying huge internal logs into the strategic context?
-9. Which authorities may be delegated once at job submission versus requiring a later Luke approval?
-10. At what point does real usage justify inserting the persistent Orchestrator instead of continuing direct Planner → Goose session control?
+### Product question for later dogfooding
+
+4. **When does real usage justify inserting the persistent Orchestrator?**  
+   This should be answered from repetitive workflow evidence, not pre-implementation architecture work.
 
 ## Priority / stop boundary
 
-This plan is intentionally preserved **without implementing it now**.
+This document remains **deferred design**, not authorization to implement Goose Control now.
 
-Do not treat the existence of this file as authorization to:
+It does not authorize:
 
-- enable Goose's hidden Orchestrator/Palmate extension in production;
-- add a new connector immediately;
-- change current compaction work;
-- alter Day Shift;
-- build the Session Guardian;
-- introduce a persistent Orchestrator;
-- expose new local-machine authority to ChatGPT.
+- changing the current Electron/browser-host migration;
+- enabling hidden Orchestrator/Palmate features in production;
+- exposing `goose serve` publicly;
+- altering Day Shift;
+- building Session Guardian;
+- granting arbitrary local-machine authority to ChatGPT;
+- restarting or disrupting a Goose process hosting an active agent.
 
-Resume only when Luke explicitly prioritizes **Goose Control** or asks to eliminate the Planner↔Goose manual relay.
-
-At that point, start a dedicated fresh planning/development chat and begin at **Phase 0 — re-evaluate before coding**.
+When Goose Control is explicitly prioritized, begin with the **bounded native-ACP smoke test**, not another architecture investigation.
