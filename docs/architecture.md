@@ -1,142 +1,163 @@
 # Architecture
 
+This document describes the **current Goose-first target architecture**. Historical managed-Chrome and inherited desktop-supervisor designs are indexed under [`history/README.md`](history/README.md) and are not operator instructions.
+
+## System shape
+
 ```text
-Codex app / CLI
-      │ Responses API on loopback
-      ▼
-launcher-owned codex-chatgpt-web daemon
-  ├─ official /models passthrough + fixed ChatGPT Web models
-  ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
-  ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
-  ├─ capability broker (full mode only)
-  └─ stdio MCP server
-            ▲
-            │ outbound OpenAI Tunnel
-            ▼
-      ChatGPT custom connector
+Goose session
+   │
+   │ OpenAI-compatible Responses request
+   ▼
+standalone Responses daemon (loopback)
+   │
+   ├─ turn/session replay metadata
+   ├─ capability broker (full mode)
+   └─ browser-helper process
+           │
+           │ BrowserHost control + CDP
+           ▼
+   Electron BrowserHost
+           │
+           ├─ persistent authenticated ChatGPT partition
+           └─ task-bound WebContentsView surface
+                    │
+                    ▼
+             ChatGPT Temporary Chat
+
+Full-mode tool return path:
+ChatGPT → Goose Native → Secure MCP Tunnel → capability broker → Goose tool
+       ← same browser response ← tool result ← Goose execution/approval
 ```
+
+## Ownership boundaries
+
+### Goose
+
+Goose is the outer harness and source of truth for:
+
+- logical conversation/session history;
+- tool registry and tool results;
+- approvals/sandbox policy;
+- native delegation/subagents;
+- recipes/extensions;
+- project execution;
+- compaction and context lifecycle.
+
+A browser conversation is transport state, not the durable Goose conversation.
+
+### Responses daemon
+
+The standalone daemon:
+
+- exposes the loopback Responses-compatible provider surface used by Goose;
+- translates Goose requests into browser turns;
+- retains only the bounded replay/session metadata needed to resume a logical browser turn across native tool-result rounds;
+- owns the browser-helper client process;
+- hosts the capability broker/MCP server in full mode;
+- exposes authenticated lifecycle controls for its own service state.
+
+The daemon does not own Electron or the Secure MCP Tunnel.
+
+### Electron BrowserHost
+
+Electron owns only browser infrastructure:
+
+- the persistent authenticated ChatGPT partition;
+- task-bound `WebContentsView` surfaces;
+- a loopback BrowserHost control endpoint;
+- a loopback CDP endpoint;
+- surface leasing/release and browser-host health/recovery.
+
+Standalone Electron must not adopt, restart, drain, or stop the Responses daemon or tunnel.
+
+### Browser helper
+
+The daemon spawns the browser helper. The helper leases the exact BrowserHost surface for a turn, attaches over CDP, performs the ChatGPT Web UI automation, streams visible response state, and returns the result to the daemon.
+
+The helper is a client of BrowserHost, not BrowserHost's supervisor.
+
+### Secure MCP Tunnel
+
+The tunnel is independently supervised. It provides the outbound ChatGPT connector transport used in full mode and owns its own MCP child/runtime. Restarting only the Responses daemon does not refresh a persistent tunnel-owned MCP child after a connector schema change.
+
+## Browser-turn lifecycle
+
+Each new logical Goose user turn normally receives a fresh ChatGPT Temporary Chat. Goose sends the accumulated context it wants the provider to see; physical reuse of a ChatGPT conversation is unnecessary.
+
+For a tool-capable response:
+
+1. the daemon creates one browser-turn session and one bounded turn capability;
+2. ChatGPT can request an action through `Goose Native`;
+3. the daemon returns the request as a normal provider tool call;
+4. Goose executes/approves the tool;
+5. Goose sends the matching tool result in the next provider round with the same native turn identity;
+6. the daemon resumes the same active browser response rather than opening another logical turn;
+7. completion revokes the capability and releases the BrowserHost surface.
+
+Volatile outer-harness metadata that changes across provider rounds must not change logical turn identity.
+
+## BrowserHost surface contract
+
+BrowserHost readiness is stronger than “Electron has a PID” or “CDP is listening.” A usable host must be able to:
+
+1. accept an authenticated turn lease;
+2. create/reuse the task-bound `WebContentsView`;
+3. inject the exact surface identity into the renderer;
+4. expose that renderer as a CDP target;
+5. allow the browser helper to select the exact leased surface;
+6. release the surface cleanly at terminal turn state.
+
+A control plane that can mint leases while its renderer path is dead is degraded and must not advertise usable readiness.
+
+## Response lifecycle
+
+The worker treats ChatGPT UI state as an unstable external interface and uses bounded stage contracts for navigation, composer readiness, effort selection, attachments, send acceptance, response health, completion, and cleanup.
+
+Browser automation must fail explicitly on UI drift. It must not silently choose another model, reasoning mode, browser transport, or provider.
+
+The Electron surface can be hidden or not frontmost; therefore response watching must preserve whatever Chromium/Electron lifecycle state is required for the task surface to remain active. This is still under final live qualification and is tracked in the active roadmap.
 
 ## Modes
 
-### `browser-only`
+### Browser-only
 
-- Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
-  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
-  the authenticated account exposes Pro.
-- Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
-- Never starts the broker, tunnel, or MCP server.
-- Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
+- routes selected ChatGPT-Web models through the browser;
+- exposes no local Goose tools through the custom connector;
+- creates no turn capability for local actions.
 
-### `full`
+### Full
 
-- Exposes the same fixed models; Instant through Extra High are tool-capable, while Pro remains
-  read-only.
-- ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
-- Every connector call presents the current turn_token directly; the MCP server idempotently claims
-  an internal binding and dispatches the call in the same request. The binding is never exposed to
-  the model.
-- Tool calls and results remain in the same ChatGPT response while the outer harness (Codex or
-  standalone Goose) executes them locally.
+- uses the `Goose Native` connector through the Secure MCP Tunnel;
+- exposes only tools advertised by the active Goose turn;
+- keeps Goose as executor/approval authority;
+- revokes the browser-turn capability on completion/abort/failure.
 
-The ChatGPT connector name is also the public MCP ABI identity. ChatGPT caches a connector's tool
-schema and granted action permission by that identity, so the direct turn-token contract uses a
-fresh name (`Goose Native`); the retired `Codex Native` identity is never selected or refreshed in
-place. Setup and the browser worker fail closed with an explicit migration error rather than
-silently reusing a legacy connector's stale contract or permission grant. See
-[security model](security-model.md) for the full capability flow.
+## Runtime lifecycle
 
-## Browser lifecycle
-
-The desktop launcher owns one persistent Electron partition and up to five task-bound browser
-tabs. Each Codex task is leased an independent `WebContentsView` and surface ID; Playwright attaches
-to that exact surface through a launcher-owned loopback CDP endpoint. It does not launch another
-browser or copy authentication state. Each tab opens a fresh Temporary Chat, shares only the local
-login partition, and keeps its own document and lifecycle. Terminal task tabs are released when the
-turn completes, fails, or is aborted; the result/history remains owned by the outer harness rather
-than the embedded browser. Closing a running tab destroys its page and terminates that browser turn.
-A sixth concurrent turn fails explicitly; the cap avoids excessive parallel traffic that could
-trigger account abuse controls.
-
-The complete serialized Codex task is inserted as one inline JSON envelope. Image bytes stay out of
-the JSON and are attached natively with stable references. The runtime does not create a context
-JSONL file, upload a synthetic context document, include prompt hashes, or truncate the envelope.
-Attachment acceptance and send readiness are verified before the turn begins.
-
-The appended models advertise the authenticated account's context window and a ten-percent
-auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
-reserves, rather than inferred from character length. The ChatGPT composer also has an independent
-inline-size boundary: usage accounting asks Codex to compact before that boundary, and a prompt
-that still exceeds the proven hard ceiling fails explicitly before any browser turn opens.
-
-Routed compaction v1/v2 runs as a dedicated read-only browser summarization turn with no broker or
-local tools, then returns the native replacement-history shape expected by Codex. A prompt-level
-checkpoint marker is translated into a visible Codex trace item; tool-capable turns re-bind the
-same capability after that checkpoint. Visible ChatGPT status rows become reasoning summaries,
-while stable prose between rows becomes native Codex commentary.
-
-## Installation and service lifecycle
-
-Each native desktop package contains Electron, a platform-matched pinned Bun executable, the
-Responses bridge, Playwright client code, MCP server, setup, doctor, and the browser helper.
-Browser-only mode downloads no browser and requires no system Node/Bun. Full mode separately
-downloads the official pinned `openai/tunnel-client` build for the current OS/architecture and
-verifies it against the release SHA-256 manifest.
-
-On first launch, the embedded runtime is identity-checked and copied atomically into a private
-versioned directory under the application home. Daemon and MCP commands use that durable copy,
-which is required because Linux AppImage mount paths are temporary and must never be persisted in
-Codex or tunnel configuration.
-
-The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the optional
-tunnel first, waits for healthy/ready evidence, starts the Responses daemon, and then waits for its
-versioned health payload. Native login items or an owner-local XDG autostart file launch the app
-hidden after sign-in. A marker containing only launcher-owned PIDs lets doctor distinguish the
-launcher runtime from a stale or external process. Legacy macOS launchd services are drained and
-removed during an explicit launcher migration; launchd remains only for the advanced terminal-only
-mode.
-
-Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
-forwards the authenticated official model catalog and appends only the routed models owned by the
-`chatgpt-web/` namespace; no static catalog is installed.
-
-On this repository, the launcher-local Electron 41.7.1 bundle was observed to partially extract
-under Node 24.16.0, leaving `Frameworks` and the Electron version marker missing. The project code
-was not the cause. A clean official Electron bootstrap under Node 20.20.2 repaired the launcher
-bundle using:
+The currently proven cold dependency order is:
 
 ```text
-force_no_cache=true npx -y node@20 launcher/node_modules/electron/install.js
+start: tunnel ready → BrowserHost genuinely ready → Responses daemon ready
+stop:  Responses daemon → BrowserHost → tunnel
 ```
 
-Before introducing any future local bootstrap workaround, re-check current upstream Electron and
-`miuuyy/codex-chatgpt-web`, because this dependency behavior may change.
+See [`runtime-lifecycle.md`](runtime-lifecycle.md) for the qualified development sequence and readiness criteria.
 
-The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
-HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky
-switch to its HTTP/SSE transport. No model or provider fallback occurs.
+The final product should encode this into one canonical BrowserHost supervisor/startup mechanism so manual recovery, post-login startup, and first-use recovery cannot construct the stack differently.
 
-Setup never restarts an already loaded daemon implicitly. A requested stop, restart, replacement,
-or uninstall first calls a private authenticated drain endpoint. The daemon rejects new turns and
-reports two independent counters:
+## Managed Chrome
 
-- active Responses HTTP requests, including native compaction passthrough;
-- active ChatGPT browser sessions, including time spent waiting for local Codex tool results.
-
-The lifecycle operation proceeds only when both counters are zero. The launcher then stops the
-tunnel through its runtime command and asks the daemon to flush state and exit through an
-authenticated shutdown endpoint. If the contract is unavailable, malformed, non-idle, or cannot
-be completed, the operation fails closed and restores the drained runtime when possible. An
-unexpected child exit is recovered with a bounded restart budget; a crash loop becomes an explicit
-launcher error.
+Managed Chrome was the initial browser transport and remains useful fallback/reference code. It is not the target primary BrowserHost architecture. Historical findings about stale-handle recovery remain relevant engineering evidence, but managed-Chrome start/restart behavior must not be projected onto Electron.
 
 ## Security invariants
 
-- Bind the Responses proxy and health endpoint to loopback only.
-- Store browser state and tunnel credentials under the application home with mode `0600`.
-- Protect lifecycle control endpoints with a random application-owned bearer token.
-- Never place secret values in command-line arguments, logs, generated profiles, or Git.
-- Limit browser turns to five independent task-bound tabs and reject unsupported models explicitly.
-  The selected routed model fixes the adapter effort; a conflicting request effort cannot change it.
-- Do not retry or switch modes to evade product usage limits.
+- Responses/control/CDP listeners remain loopback-only.
+- Browser authentication state and tunnel credentials remain private local state.
+- Lifecycle control uses scoped authenticated endpoints where applicable.
+- Tool authority originates from the active Goose turn, not user-authored prompt text.
+- A model cannot silently widen the tool registry or sandbox.
+- Unsupported model/effort/tool combinations fail explicitly.
+- The bridge does not retry or switch transports to evade ChatGPT usage limits.
 
-See the complete [security model](security-model.md).
+See [`security-model.md`](security-model.md).
