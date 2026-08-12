@@ -98,6 +98,53 @@ A long turn that continues to show credible progress should not fail simply beca
 
 Preserve the original causal error when a terminal failure occurs.
 
+## Independent live evidence: long-running Goose Native invocation
+
+A ChatGPT-Web Electron session on 2026-08-12 produced the same terminal error seen during failed continuation:
+
+```text
+chatgpt_browser_control_unresponsive
+```
+
+but this occurrence followed a **long-running Goose Native tool invocation**, not merely the act of advancing to a second user prompt.
+
+The last visible tool command created a disposable local proof environment and ended with a foreground service:
+
+```bash
+exec env GOOSE_SERVER__SECRET_KEY="<redacted>" \
+  goose serve --host 127.0.0.1 --port "$PORT"
+```
+
+A healthy `goose serve` process is expected to remain alive. The active ChatGPT response therefore stayed open waiting on a long-running outer-harness command.
+
+Current post-send liveness still probes only:
+
+```ts
+page.evaluate(() => document.readyState)
+```
+
+at 5-second intervals, bounds each probe to 3 seconds, and terminates after two consecutive failures. The browser worker races that watcher against the entire response/tool loop, so the watcher remains armed while ChatGPT is waiting for a long-running Goose Native call.
+
+This incident does **not** prove the foreground service caused CDP/control loss. A healthy task-bound renderer should remain controllable while an MCP call is pending. It instead provides independent evidence that the current Electron liveness mechanism can become terminal during a sustained active tool turn and must be investigated on its own merits.
+
+The full incident note is on PR #29 at:
+
+`docs/future-long-running-tool-liveness-incident.md`
+
+Keep the fault boundaries distinct:
+
+```text
+cross-transport continuation defect
+  ≠
+Electron post-send control-liveness defect
+```
+
+The Electron defect may amplify the continuation failure, but cannot explain the managed-Chrome continuation history.
+
+The incident also exposes a separate contract to qualify: `codex_exec` advertises that long-running commands return a native `session_id`, but when standalone Goose exposes only its plain `shell` capability, the bridge currently forwards only `{ command }` and cannot impose `yield_time_ms`, TTY/session semantics, or a bounded session handoff. Future work should verify the real Goose 1.45 command schema and make this public behavior truthful rather than allowing a foreground service to wedge an MCP invocation indefinitely.
+
+Do not respond by merely increasing the liveness timeout. Determine whether the renderer really became unresponsive, whether the helper/control path stalled while the renderer remained healthy, or whether two `document.readyState` probe failures are simply insufficient terminal evidence.
+
 ## Constraints learned from current Electron qualification
 
 Do not regress these findings while implementing the future design:
@@ -150,7 +197,8 @@ Before declaring this hardening complete, a dedicated implementation milestone s
 5. no second diagnostic CDP observer is required;
 6. tests cover the state transitions independently of live ChatGPT timing where practical;
 7. ordinary Goose first turn and dependent separate `--resume` still pass after the change;
-8. the repeated “Searching Available Todo Tools” delay is measured and causally attributed before any optimization is attempted, with project-controlled avoidable latency reduced only if doing so preserves the existing tool/security contract.
+8. the repeated “Searching Available Todo Tools” delay is measured and causally attributed before any optimization is attempted, with project-controlled avoidable latency reduced only if doing so preserves the existing tool/security contract;
+9. a controlled long-running Goose Native command remains healthy substantially beyond the current liveness-probe window, and the `codex_exec` / `session_id` contract is proven against the actual Goose command capability rather than inferred from richer Codex-style tools.
 
 ## Reconciliation rule
 
