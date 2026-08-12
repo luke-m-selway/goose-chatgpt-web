@@ -13,6 +13,8 @@ Before architecture, startup/restart, browser-host, provider, or tunnel work, re
 
 Current documentation outranks historical material and deferred proposals. Do not infer ownership from a filename such as `launcher`.
 
+Where a current document is marked **provisional**, read its explicit qualification gaps before acting. Do not promote a proposed startup trigger, service name, environment variable, or migration target into a fact without live/code evidence. If the current task resolves a documented provisional item, update the documentation with the observed result instead of leaving the old uncertainty in place.
+
 ## Host/session safety
 
 - Preserve ignored `.env` files, browser authentication state, runtime keys, credentials, and unrelated local proof artifacts unless the task explicitly authorizes changing them.
@@ -30,12 +32,14 @@ Current documentation outranks historical material and deferred proposals. Do no
 - The Secure MCP Tunnel is independently supervised.
 - Electron must not adopt, restart, or stop the standalone daemon or tunnel.
 
-The qualified dependency order is:
+The currently proven safe dependency order is:
 
 ```text
 start: tunnel ready → BrowserHost genuinely ready → Responses daemon ready
 stop:  Responses daemon → BrowserHost → tunnel
 ```
+
+This is the canonical sequence until another ordering is explicitly qualified; it is not proof that every other order is technically impossible.
 
 Do not treat PID/descriptor/CDP existence alone as BrowserHost readiness; prove a disposable leased surface can materialize and be selected when the task requires a cold-start proof.
 
@@ -43,7 +47,7 @@ Do not treat PID/descriptor/CDP existence alone as BrowserHost readiness; prove 
 
 `scripts/start-goose-launcher.ts` is a legacy filename. It does **not** launch Goose. It starts the standalone Electron BrowserHost in bootstrap-only mode and blocks in the foreground. Until the naming/supervision migration lands, do not launch it from an ephemeral shell and do not substitute generic `app`, `launcher`, or development scripts for the documented standalone BrowserHost path.
 
-Do not create new names containing `codex` unless referring to the actual Codex agent/ACP specialist. See `docs/naming.md`.
+Do not create new names containing `codex` unless referring to the actual Codex agent/ACP specialist or an explicitly labeled legacy identifier being migrated. See `docs/naming.md`.
 
 ## Browser diagnostics
 
