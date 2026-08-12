@@ -110,6 +110,24 @@ Do not regress these findings while implementing the future design:
 - do not move daemon/tunnel ownership into Electron;
 - do not reverse engineer private ChatGPT request formats as a new provider contract.
 
+## Fresh-turn tool-discovery latency to investigate
+
+A repeated visible delay has been observed when a fresh ChatGPT-Web Temporary Chat begins: ChatGPT can display an activity label such as **“Searching Available Todo Tools”** for a long period before useful work continues.
+
+The cause is **not yet proven**. Do not document this as “todo-list creation” or as a bridge defect without evidence.
+
+When this future observability/performance work is resumed, correlate one or more occurrences across the full browser/tool path and determine:
+
+- whether the visible activity corresponds to ChatGPT-side app/tool discovery, a `Goose Native` tool inventory/search request, a tunnel round trip, or another browser-side operation;
+- whether the discovery repeats for every fresh Temporary Chat/new logical Goose turn;
+- how much wall-clock latency it adds before the first useful model/tool action;
+- whether any repeated work is controlled by this project and can be safely cached, pre-advertised, or otherwise avoided without widening tool authority or relying on stale schemas;
+- whether the delay is intrinsic ChatGPT behavior that the bridge should merely observe rather than attempt to optimize.
+
+Use correlated daemon/tunnel/browser-helper/BrowserHost evidence where available rather than inferring the cause from the ChatGPT UI label alone. Any optimization must preserve fresh-turn isolation, current Goose tool authority, fail-closed connector behavior, and schema correctness.
+
+This is a performance/observability investigation, not justification for reusing ChatGPT conversation history across Goose turns.
+
 ## Scope boundary
 
 This is a **future runtime-hardening milestone**, separate from:
@@ -131,7 +149,8 @@ Before declaring this hardening complete, a dedicated implementation milestone s
 4. completion is detected from stable response-semantic evidence, optionally corroborated by browser-network completion;
 5. no second diagnostic CDP observer is required;
 6. tests cover the state transitions independently of live ChatGPT timing where practical;
-7. ordinary Goose first turn and dependent separate `--resume` still pass after the change.
+7. ordinary Goose first turn and dependent separate `--resume` still pass after the change;
+8. the repeated “Searching Available Todo Tools” delay is measured and causally attributed before any optimization is attempted, with project-controlled avoidable latency reduced only if doing so preserves the existing tool/security contract.
 
 ## Reconciliation rule
 
