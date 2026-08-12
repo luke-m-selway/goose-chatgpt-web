@@ -6,11 +6,22 @@ The project accumulated a detailed chronological roadmap while the browser trans
 
 ## Exact pre-cleanup snapshot
 
-The complete documentation state immediately before this cleanup is preserved by Git at commit:
+The complete documentation state immediately before this cleanup is preserved immutably by Git at commit:
 
 `76941119f33ec359c1d4b4b47f4d5c7df5b91c74`
 
 Use that revision when investigating why a historical decision was made. Do not copy commands from it into a current runtime without rechecking the current architecture.
+
+Direct historical views at that exact revision:
+
+- [root README at the pre-cleanup snapshot](https://github.com/luke-m-selway/goose-chatgpt-web/blob/76941119f33ec359c1d4b4b47f4d5c7df5b91c74/README.md)
+- [architecture at the pre-cleanup snapshot](https://github.com/luke-m-selway/goose-chatgpt-web/blob/76941119f33ec359c1d4b4b47f4d5c7df5b91c74/docs/architecture.md)
+- [full chronological roadmap at the pre-cleanup snapshot](https://github.com/luke-m-selway/goose-chatgpt-web/blob/76941119f33ec359c1d4b4b47f4d5c7df5b91c74/docs/roadmap.md)
+- [security model at the pre-cleanup snapshot](https://github.com/luke-m-selway/goose-chatgpt-web/blob/76941119f33ec359c1d4b4b47f4d5c7df5b91c74/docs/security-model.md)
+- [agent rules at the pre-cleanup snapshot](https://github.com/luke-m-selway/goose-chatgpt-web/blob/76941119f33ec359c1d4b4b47f4d5c7df5b91c74/AGENTS.md)
+- [contributing guide at the pre-cleanup snapshot](https://github.com/luke-m-selway/goose-chatgpt-web/blob/76941119f33ec359c1d4b4b47f4d5c7df5b91c74/CONTRIBUTING.md)
+
+The old documents are linked rather than copied into this active branch on purpose. A duplicate historical roadmap/architecture in the live docs tree would remain searchable and could again be mistaken for current instructions. Git is the preservation layer; this index is the signpost.
 
 In particular, that snapshot preserves:
 
