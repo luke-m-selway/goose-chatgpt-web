@@ -12,44 +12,60 @@ The Electron BrowserHost already supports real Goose → ChatGPT-Web turns and d
 
 Acceptance:
 
-- one real ordinary-Goose dependent continuation through native turn metadata;
+- one real ordinary-Goose dependent continuation through native turn metadata on the current reconstructed runtime;
 - one unattended turn that crosses the previously observed response-watch failure boundary without a diagnostic second CDP client;
 - dependent continuation after that long turn;
 - focused/full tests and typechecks clean;
 - no regression in helper heartbeat, turn cleanup, or BrowserHost surface ownership.
 
+Known unresolved detail: the current lifecycle-reassertion experiment still needs production-path live proof. Until that proof exists, do not describe the response-watch problem as fixed merely because focused tests pass.
+
 Do not reopen managed-Chrome or generic `browser_page` hypotheses without evidence from the actual failing production path.
 
 ## 2. Make BrowserHost startup deterministic
 
-Status: **manual cold reconstruction proven; supervision not yet encoded**.
+Status: **manual cold reconstruction proven; supervision/automatic trigger not yet encoded**.
 
-A complete cold shutdown and reconstruction has been proven with the dependency order:
+A complete cold shutdown and reconstruction has been proven with the safe observed sequence:
 
 ```text
 start: tunnel ready → BrowserHost genuinely ready → Responses daemon ready
 stop:  Responses daemon → BrowserHost → tunnel
 ```
 
+This is the canonical order for now. The proof established that the sequence works; it did **not** establish that every other order is technically impossible.
+
+Still to decide/prove:
+
+- whether normal startup is triggered at macOS login, lazily on the first ChatGPT-Web request, or uses login startup plus first-use recovery;
+- the exact canonical BrowserHost service/CLI name and supervision mechanism;
+- the exact non-secret environment/runtime-home/build identity that supervisor fixes so repeated launches are equivalent;
+- whether BrowserHost readiness becomes a formal health command/endpoint or remains a composed readiness check;
+- a reboot-equivalent reconstruction through the final supervisor;
+- ordinary Goose first turn + dependent continuation from that final automatically reconstructed state;
+- cross-platform behavior if/when the standalone Goose deployment is qualified beyond macOS.
+
 Next:
 
 - create one canonical BrowserHost lifecycle interface/supervisor;
-- use that same mechanism for manual start/restart and automatic post-login/reboot startup;
-- add bounded first-use recovery that invokes the same mechanism rather than inventing a second launch path;
+- use that same mechanism for manual start/restart and automatic startup/recovery;
+- add bounded first-use recovery only by invoking that same mechanism rather than inventing a second launch path;
 - make BrowserHost readiness prove disposable surface creation/selection, not only PID/descriptor/CDP existence;
-- perform a reboot-equivalent proof: cold system → automatic reconstruction → ordinary Goose first turn → dependent continuation.
+- perform the reboot-equivalent proof once the trigger/supervisor is selected.
 
-See [`runtime-lifecycle.md`](runtime-lifecycle.md).
+See [`runtime-lifecycle.md`](runtime-lifecycle.md) for the explicit proven-vs-provisional register.
 
 ## 3. Complete Goose naming migration
 
-Status: **specified, implementation pending**.
+Status: **conceptual naming settled; exact persisted/ABI rename implementation pending**.
 
 Remove inherited outer-harness/product naming from runtime identifiers, package metadata, service labels, environment variables, connector actions, and ambiguous launcher scripts.
 
-The word `Codex` is reserved for the actual Codex agent/ACP specialist deliberately invoked as a development worker.
+The word `Codex` is reserved for the actual Codex agent/ACP specialist deliberately invoked as a development worker, or for an explicitly labeled historical/legacy identifier being migrated.
 
-Required migration targets are listed in [`naming.md`](naming.md). Do this mechanically after active Electron reliability changes are checkpointed so naming churn cannot obscure browser-behaviour debugging.
+Required migration directions and still-open exact identifier decisions are listed in [`naming.md`](naming.md). Do this mechanically after active Electron reliability changes are checkpointed so naming churn cannot obscure browser-behaviour debugging.
+
+Before declaring the naming migration complete, prove that old persisted config/service/tunnel/connector state is either migrated transactionally or explicitly retired, and that the current docs contain no unexplained inherited `codex*` operator/API name.
 
 ## 4. Return ChatGPT-Web to main-agent ownership
 
