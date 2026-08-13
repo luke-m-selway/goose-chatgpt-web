@@ -9,8 +9,9 @@ Independent review of PR #31 recorded these gates:
 
 - native liveness design: **PASS**;
 - the roughly 76–80 second stale-control plus prolonged-indeterminate model: **PASS**;
-- exact source/runtime revision match at the runtime reviewed on 2026-08-13: **FAIL**;
-- qualification analyzer/runner correctness: repairs were required before any live proof.
+- qualification analyzer/runner correctness at `c84b28d06702c80cd22b2cb9459898ceef8f4c82`:
+  **PASS**;
+- exact source/runtime revision match at the runtime reviewed on 2026-08-13: **FAIL**.
 
 Those analyzer/runner repairs are now part of the candidate, but no live proof has been run against
 them. The reviewed runtime is not eligible for a qualification baseline: its helper and Electron
@@ -54,13 +55,15 @@ terminal control-liveness evidence.
 ## Mandatory exact-revision activation and preflight
 
 This is an **operator-only, disruptive prerequisite**, not part of `baseline`, `analyze`, or the
-qualification runner. Do not perform it from a turn using the runtime being restarted. Replace the
-placeholder with the exact reviewed repair commit; every check is fail-closed.
+qualification runner. Do not perform it from a turn using the runtime being restarted. It pins the
+exact independently reviewed repair commit; every check is fail-closed.
 
 ```bash
+set -euo pipefail
+
 qualification_repo="/Users/luke/Documents/goose-chatgpt-web"
 qualification_runtime_home="/Users/luke/.goose-chatgpt-web-dev"
-qualification_commit="<exact-reviewed-repair-commit-sha>"
+qualification_commit="c84b28d06702c80cd22b2cb9459898ceef8f4c82"
 qualification_launcher_log="/Users/luke/Library/Logs/Codex Web GPT/launcher.jsonl"
 
 cd "$qualification_repo"
@@ -120,7 +123,40 @@ CODEX_CHATGPT_WEB_HOME="$qualification_runtime_home" \
   bun run src/cli.ts lifecycle status
 
 qualification_preflight_dir="$qualification_runtime_home/qualification/preflight-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$qualification_preflight_dir"
+mkdir -m 700 "$qualification_preflight_dir"
+
+qualification_launcher_archive="$qualification_preflight_dir/launcher.pre-baseline.jsonl"
+qualification_launcher_archive_rotated=""
+test -f "$qualification_launcher_log"
+if test -f "${qualification_launcher_log}.1"; then
+  qualification_launcher_archive_rotated="$qualification_preflight_dir/launcher.pre-baseline.jsonl.1"
+  mv "${qualification_launcher_log}.1" "$qualification_launcher_archive_rotated"
+fi
+mv "$qualification_launcher_log" "$qualification_launcher_archive"
+
+qualification_launcher_archive_manifest="$qualification_preflight_dir/launcher-archives.sha256"
+(
+  cd "$qualification_preflight_dir"
+  for qualification_archived_name in \
+    launcher.pre-baseline.jsonl.1 \
+    launcher.pre-baseline.jsonl
+  do
+    test ! -f "$qualification_archived_name" || shasum -a 256 "$qualification_archived_name"
+  done
+) >"$qualification_launcher_archive_manifest"
+
+qualification_boundary_baseline="$qualification_preflight_dir/clean-boundary-baseline.json"
+bun run scripts/chatgpt-web-qualification.ts baseline \
+  --runtime-home "$qualification_runtime_home" \
+  --output "$qualification_boundary_baseline"
+jq -e --arg repositoryRoot "$qualification_repo" --arg runtimeHome "$qualification_runtime_home" '
+  .kind == "chatgpt-web-qualification-baseline"
+  and .repositoryRoot == $repositoryRoot
+  and .runtimeHome == $runtimeHome
+  and .evidenceBoundaryClean == true
+  and (.evidenceBoundaryNotes | length == 0)
+' "$qualification_boundary_baseline" >/dev/null
+
 jq -n \
   --arg commit "$qualification_commit" \
   --arg activatedAt "$qualification_activation_utc" \
@@ -129,9 +165,17 @@ jq -n \
   --arg daemonPid "$qualification_daemon_pid" \
   --arg browserHostPid "$qualification_browser_pid" \
   --arg browserHostCwd "$qualification_browser_cwd" \
+  --arg launcherArchive "$qualification_launcher_archive" \
+  --arg launcherArchiveRotated "$qualification_launcher_archive_rotated" \
+  --arg launcherArchiveManifest "$qualification_launcher_archive_manifest" \
+  --arg cleanBoundaryBaseline "$qualification_boundary_baseline" \
   '{commit:$commit, activatedAt:$activatedAt, helperPath:$helperPath,
     helperSha256:$helperSha256, daemonPid:($daemonPid|tonumber),
-    browserHostPid:($browserHostPid|tonumber), browserHostCwd:$browserHostCwd}' \
+    browserHostPid:($browserHostPid|tonumber), browserHostCwd:$browserHostCwd,
+    launcherArchives:([$launcherArchiveRotated, $launcherArchive] | map(select(length > 0))),
+    launcherArchiveManifest:$launcherArchiveManifest,
+    cleanBoundaryBaseline:$cleanBoundaryBaseline,
+    evidenceBoundaryClean:true}' \
   >"$qualification_preflight_dir/exact-revision.json"
 ```
 
@@ -139,8 +183,17 @@ The explicit helper build establishes the expected content hash. Canonical `life
 from this checkout, rebuilds/starts the development Electron BrowserHost and restarts the daemon in
 canonical order. Matching descriptor hash, exact source blobs, daemon command, Electron working
 directory, and post-activation lifecycle-aware start evidence prove content identity and origin;
-mtime alone is never accepted. Retain `exact-revision.json` beside the later run artifacts. If any
-command fails, stop: do not establish a baseline or run a qualification.
+mtime alone is never accepted.
+
+Only after those checks and canonical lifecycle status pass, the procedure moves both launcher log
+generations that the boundary scanner reads (`launcher.jsonl.1`, when present, and `launcher.jsonl`)
+to retained, hashed files under the preflight evidence directory. The active launcher paths are not
+copied or truncated, so stale unmatched historical `lifecycle_*` starts cannot contaminate the next
+boundary while their source evidence remains intact. A first-party monitor baseline then recomputes
+the boundary and `jq -e` requires `evidenceBoundaryClean == true` with no boundary notes. Retain the
+archived logs, hash manifest, `clean-boundary-baseline.json`, and `exact-revision.json` together. The
+preflight baseline proves only that cleanup boundary; the deterministic runner must still capture
+its own fresh run baseline. If any command fails, stop before any qualification baseline or workload.
 
 ## Standalone monitor commands
 
