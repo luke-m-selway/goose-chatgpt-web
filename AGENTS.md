@@ -11,8 +11,9 @@ Before architecture, lifecycle, BrowserHost, tunnel, or Goose Control work, read
 3. `docs/runtime-lifecycle.md`
 4. `docs/roadmap.md`
 5. `docs/goose-control-plan.md` when the task concerns Goose Control
+6. `docs/chatgpt-web-subagents.md` when the task concerns ChatGPT-Web subagents or BrowserHost concurrency qualification
 
-Current documentation outranks historical roadmap material and draft PR designs. Draft PR #25 and PR #26 are design inputs only after the documentation reconciliation on current `main`.
+Current documentation outranks historical roadmap material and draft PR designs.
 
 ## Host/session safety
 
@@ -43,9 +44,15 @@ Use the canonical lifecycle entry point rather than reconstructing startup from 
 
 - BrowserHost readiness uses the descriptor-provided browser helper with Node/Electron Node semantics and `ELECTRON_RUN_AS_NODE=1`. Bun-direct Playwright/CDP is not authoritative readiness evidence.
 - A lifecycle/autostart proof launched from an active BrowserHost-backed turn can interfere with the runtime carrying that same turn. Do not generalize such self-interference into an Electron regression.
-- Ordinary Goose continuation proof is a persisted named session followed by a separate later `--resume`. Do not substitute stdin-interactive Goose or a hand-written `previous_response_id` request for that proof.
-- Fresh ChatGPT Temporary Chats across Goose user turns are expected. Goose, not browser chat reuse, owns durable continuation.
+- Ordinary Goose continuation is already proven. Fresh ChatGPT Temporary Chats across Goose user turns are expected; Goose, not browser chat reuse, owns durable continuation.
+- Same-Goose-session continuation has also survived a preceding delegation/network-error episode and produced a coherent follow-up. Do not infer that any tool/delegation error necessarily poisons later continuation.
 - Ordered macOS autostart is implemented and live-checked short of an actual reboot/login. Reboot/login reconstruction remains **NOT RUN** until explicitly performed.
+- Natural ChatGPT-Web parent → Goose-native → ChatGPT-Web child execution under Electron is **PROVEN**. Distinct parent/child surfaces and real overlap are **PROVEN**. Do not spend work re-proving the basic one-child capability unless new contradictory evidence appears.
+- Goose native async delegation is invocation-level: `delegate(..., async: true)`. If `async` is omitted it defaults false. Prose inside child `instructions` does not force background execution. Named recipes can stabilize child provider/model/workload, but the parent tool call must still carry `async: true` unless Goose's schema changes.
+- A prior parent + two run achieved about 24 seconds of genuine three-way overlap. Its failure was a false `chatgpt_browser_control_unresponsive` terminal on two still-live turns, not proof that the BrowserHost cannot host three surfaces.
+- Slow CDP/DOM operations are congestion evidence, not by themselves renderer-death evidence. Preserve deterministic/native lifecycle distinctions (`gone`/`destroyed` terminal; `unresponsive` degraded/recoverable; `responsive` recovery) when working on the active liveness hardening.
+- The BrowserHost five-tab limit is a safety ceiling, not a target operating envelope. The intended normal qualification target is parent + two children.
+- Qualification results must name the exact committed revision and helper bundle under test. Prefer committed first-party runner/analyzer infrastructure over ad-hoc monitor-agent shell reconstruction.
 
 ## Goose Control boundary
 
@@ -57,5 +64,7 @@ Use the canonical lifecycle entry point rather than reconstructing startup from 
 
 ## Delegation
 
-- Until BrowserHost concurrency is explicitly qualified for a task, avoid parallel ChatGPT-Web child fan-out under the managed browser host.
+- Recursive one-child ChatGPT-Web delegation is qualified, but parallel ChatGPT-Web child fan-out is not yet a supported operating envelope. Do not claim parent + two as reliable until the proofs in `docs/chatgpt-web-subagents.md` pass on the current liveness implementation.
+- For natural parent + two tests, use named child recipes to minimize model-generated arguments and require explicit `async: true` on both delegate invocations.
+- If a model omits `async: true`, classify the run as an invalid async sequence rather than a BrowserHost concurrency failure.
 - When delegating to a non-ChatGPT/free worker, name the intended provider/model explicitly so it does not inherit ChatGPT-Web transport by accident.
