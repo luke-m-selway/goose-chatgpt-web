@@ -272,6 +272,7 @@ class BrowserHost {
     this.surfaceActive = true;
     this.turnTabs = new Map();
     this.closedTurnOwners = new Map();
+    this.closedTurnLifecycles = new Map();
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
@@ -393,6 +394,11 @@ class BrowserHost {
       bootstrapReady: false,
       bootstrapDeadlineAt: Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
       lastHeartbeatAt: Date.now(),
+      rendererPid: this.readRendererPid(view.webContents),
+      rendererLifecycleStatus: "active",
+      rendererLifecycleEvent: "created",
+      rendererLifecycleRevision: 0,
+      rendererLifecycleReason: undefined,
     };
     this.turnTabs.set(id, tab);
     this.window.contentView.addChildView(view);
@@ -429,6 +435,7 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-finish-load", () => {
+      this.refreshRendererPid(tab);
       tab.url = contents.getURL();
       tab.loading = false;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
@@ -470,15 +477,107 @@ class BrowserHost {
       this.removeTurnTab(tab, true);
     });
     contents.on("render-process-gone", (_event, details) => {
+      this.updateTurnLifecycle(tab, "gone", "render-process-gone", details.reason);
       tab.message = `Browser renderer stopped: ${details.reason}`;
       this.logger.error("browser.tab_renderer_gone", {
         tabId: tab.id,
         traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
         reason: details.reason,
         exitCode: details.exitCode,
       });
       this.removeTurnTab(tab, true);
     });
+    contents.on("unresponsive", () => {
+      if (!this.turnTabs.has(tab.id)) return;
+      this.updateTurnLifecycle(tab, "unresponsive", "unresponsive");
+      this.logger.warn("browser.tab_renderer_unresponsive", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
+      });
+      this.publishState?.(this.snapshot());
+    });
+    contents.on("responsive", () => {
+      if (!this.turnTabs.has(tab.id)) return;
+      this.updateTurnLifecycle(tab, "active", "responsive");
+      this.logger.info("browser.tab_renderer_responsive", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
+      });
+      this.publishState?.(this.snapshot());
+    });
+    contents.on("destroyed", () => {
+      if (!this.turnTabs.has(tab.id)) {
+        if (this.closedTurnOwners.get(tab.traceId) === tab.helperPid
+          && tab.rendererLifecycleStatus !== "gone"
+          && tab.rendererLifecycleStatus !== "destroyed") {
+          this.updateTurnLifecycle(tab, "destroyed", "destroyed");
+          this.closedTurnLifecycles?.set(tab.traceId, this.turnLifecycleSnapshot(tab));
+        }
+        return;
+      }
+      this.updateTurnLifecycle(tab, "destroyed", "destroyed");
+      this.logger.error("browser.tab_web_contents_destroyed", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
+      });
+      this.removeTurnTab(tab, true);
+    });
+  }
+
+  readRendererPid(contents) {
+    if (!contents || contents.isDestroyed?.()) return null;
+    try {
+      const rendererPid = contents.getOSProcessId();
+      return Number.isInteger(rendererPid) && rendererPid > 0 ? rendererPid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  refreshRendererPid(tab) {
+    const rendererPid = this.readRendererPid(tab.view?.webContents);
+    if (rendererPid) tab.rendererPid = rendererPid;
+    return tab.rendererPid ?? null;
+  }
+
+  updateTurnLifecycle(tab, status, event, reason) {
+    this.refreshRendererPid(tab);
+    tab.rendererLifecycleStatus = status;
+    tab.rendererLifecycleEvent = event;
+    tab.rendererLifecycleRevision = (tab.rendererLifecycleRevision ?? 0) + 1;
+    tab.rendererLifecycleReason = typeof reason === "string" && reason ? reason : undefined;
+  }
+
+  turnLifecycleSnapshot(tab) {
+    const contents = tab.view?.webContents;
+    if (tab.rendererLifecycleStatus !== "gone"
+      && tab.rendererLifecycleStatus !== "destroyed"
+      && contents?.isDestroyed?.()) {
+      this.updateTurnLifecycle(tab, "destroyed", "destroyed");
+    } else {
+      this.refreshRendererPid(tab);
+    }
+    return {
+      traceId: tab.traceId,
+      surfaceId: tab.surfaceId,
+      rendererPid: tab.rendererPid ?? null,
+      status: tab.rendererLifecycleStatus ?? "active",
+      event: tab.rendererLifecycleEvent ?? "created",
+      revision: tab.rendererLifecycleRevision ?? 0,
+      ...(tab.rendererLifecycleReason ? { reason: tab.rendererLifecycleReason } : {}),
+    };
   }
 
   bindWebContents() {
@@ -751,6 +850,8 @@ class BrowserHost {
     const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
     if (!tab) {
       const closedOwner = this.closedTurnOwners.get(traceId);
+      const closedLifecycle = this.closedTurnLifecycles?.get(traceId);
+      if (closedOwner === helperPid && closedLifecycle) return closedLifecycle;
       if (closedOwner === helperPid) throw new Error(`Browser turn ${traceId} was already released`);
       throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);
     }
@@ -759,7 +860,9 @@ class BrowserHost {
     }
     if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
     tab.lastHeartbeatAt = Date.now();
-    return this.snapshot();
+    const lifecycle = this.turnLifecycleSnapshot(tab);
+    if (lifecycle.status === "destroyed") this.removeTurnTab(tab, true);
+    return lifecycle;
   }
 
   reapExpiredTurnTabs(now = Date.now()) {
@@ -833,6 +936,10 @@ class BrowserHost {
     this.turnTabs.delete(tab.id);
     if (abortRunning && tab.status === "running") {
       this.closedTurnOwners.set(tab.traceId, tab.helperPid);
+      const lifecycle = this.turnLifecycleSnapshot(tab);
+      if (lifecycle.status === "gone" || lifecycle.status === "destroyed") {
+        this.closedTurnLifecycles?.set(tab.traceId, lifecycle);
+      }
       tab.status = "aborted";
     }
     try { this.window.contentView.removeChildView(tab.view); } catch {}
@@ -1032,6 +1139,7 @@ class BrowserHost {
       existing.bootstrapReady = false;
       existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
       existing.lastHeartbeatAt = Date.now();
+      this.updateTurnLifecycle(existing, "active", "created");
       if (!existing.view.webContents.isDestroyed()) {
         existing.view.webContents.setBackgroundThrottling(false);
       }
@@ -1041,7 +1149,11 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
-      return { surfaceId: existing.surfaceId, tabId: existing.id };
+      return {
+        surfaceId: existing.surfaceId,
+        tabId: existing.id,
+        lifecycle: this.turnLifecycleSnapshot(existing),
+      };
     }
     const tab = this.createTurnTab(traceId, helperPid);
     this.selectedTabId = tab.id;
@@ -1049,7 +1161,7 @@ class BrowserHost {
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    return { surfaceId: tab.surfaceId, tabId: tab.id };
+    return { surfaceId: tab.surfaceId, tabId: tab.id, lifecycle: this.turnLifecycleSnapshot(tab) };
   }
 
   async endTurn(traceId, helperPid, status, hideAfterTurn, message) {
@@ -1058,6 +1170,7 @@ class BrowserHost {
       const closedOwner = this.closedTurnOwners.get(traceId);
       if (closedOwner === helperPid) {
         this.closedTurnOwners.delete(traceId);
+        this.closedTurnLifecycles?.delete(traceId);
         return;
       }
       throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);

@@ -1,0 +1,25 @@
+version: "1.0.0"
+title: ChatGPT-Web Concurrency High Session
+description: Read-only high-effort ordinary Goose workload for deterministic three-surface qualification.
+settings:
+  goose_provider: custom_chatgpt_web__local_1
+  goose_model: chatgpt-web/high
+  max_turns: 12
+instructions: |
+  You are the independent high-effort session in a deterministic ChatGPT-Web three-surface
+  liveness qualification. Work only in the current repository. Make no changes. Do not delegate,
+  start or stop runtime services, or inspect browser surfaces directly. Use the inherited normal
+  Goose tools and complete the exact bounded workload in the prompt. End with high-session-ok.
+prompt: |
+  Perform this read-only workload using at least three separate Goose Native shell calls:
+
+  1. Run `pwd`, `git status --short`, and `git branch --show-current`.
+  2. Read `docs/architecture.md`, `docs/runtime-lifecycle.md`, and `AGENTS.md`.
+  3. Read `src/adapters/chatgpt-web/browser-worker.ts` around post-send liveness monitoring.
+  4. Read `launcher/electron/browser-host.cjs` around turn creation, heartbeat, release, and native
+     renderer lifecycle handling.
+  5. Report eight concise invariants that a three-surface qualification must prove.
+
+  Make no modifications. End the final response with exactly:
+
+  high-session-ok

@@ -43,6 +43,7 @@ import {
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
+  type LauncherTurnLifecycleState,
 } from "../../launcher-browser-host";
 import { resolveChatGptWebContextLimits } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
@@ -1625,7 +1626,10 @@ export class ChatGptBrowserWorker {
     throw new Error("ChatGPT accepted the prompt attachments but did not make the message ready to send");
   }
 
-  private async responseDomSnapshot(responseTurn: Locator): Promise<ChatGptResponseDomSnapshot> {
+  private async responseDomSnapshot(
+    responseTurn: Locator,
+    onReadFailure?: (error: unknown) => void,
+  ): Promise<ChatGptResponseDomSnapshot> {
     const snapshot = await responseTurn.evaluate((element, completionActionSelector) => {
       const root = element as HTMLElement;
       const visible = (candidate: HTMLElement): boolean => {
@@ -1795,10 +1799,13 @@ export class ChatGptBrowserWorker {
         completionActionVisible: completionAction !== undefined,
         traceBlocks,
       };
-    }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(() => {
+    }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(error => {
       if (responseTurn.page().isClosed()) {
         throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
       }
+      // A failed read is a control-path outcome, not an observation that the response is gone.
+      // It is still reported as absent here, but the caller is told the difference.
+      onReadFailure?.(error);
       return absentResponseDomSnapshot();
     });
     snapshot.traceBlocks = snapshot.traceBlocks.filter(block => !isChatGptTraceControl(block));
@@ -1862,6 +1869,7 @@ export class ChatGptBrowserWorker {
     });
     const surfaceId = lease.surfaceId;
     if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
+    let nativeLifecycle = lease.lifecycle;
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
     let originalError: unknown;
@@ -1875,7 +1883,12 @@ export class ChatGptBrowserWorker {
         phase: "heartbeat",
         traceId: turn.traceId,
         helperPid: process.pid,
-      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).catch(error => {
+      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).then(result => {
+        if (result.lifecycle?.surfaceId !== surfaceId) {
+          throw new Error("Launcher turn heartbeat returned lifecycle state for a different browser surface");
+        }
+        nativeLifecycle = result.lifecycle;
+      }).catch(error => {
         const now = Date.now();
         if (now - lastHeartbeatFailureAt < 30_000) return;
         lastHeartbeatFailureAt = now;
@@ -1889,7 +1902,7 @@ export class ChatGptBrowserWorker {
     try {
       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref?.();
-      return await this.runBrowserTurn(turn, surfaceId);
+      return await this.runBrowserTurn(turn, surfaceId, undefined, () => nativeLifecycle);
     } catch (error) {
       originalError = error;
       terminal = error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed";
@@ -1918,6 +1931,7 @@ export class ChatGptBrowserWorker {
     turn: BrowserTurn,
     launcherSurfaceId?: string,
     maintenancePage?: Page,
+    getNativeLifecycle?: () => LauncherTurnLifecycleState | undefined,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities);
@@ -2040,6 +2054,8 @@ export class ChatGptBrowserWorker {
       });
       let lastProgressAt = Date.now();
       let lastProgressSignature = "";
+      let domReadFailures = 0;
+      let lastDomReadFailureAt = 0;
       const controlLiveness = startPostSendBrowserControlLiveness(
         () => page.evaluate(() => document.readyState),
         {
@@ -2047,6 +2063,26 @@ export class ChatGptBrowserWorker {
           probeTimeoutMs: CHATGPT_POST_SEND_CONTROL_PROBE_TIMEOUT_MS,
           maxConsecutiveFailures: CHATGPT_POST_SEND_CONTROL_MAX_CONSECUTIVE_FAILURES,
           isProgressing: () => Date.now() - lastProgressAt < 15_000,
+          getNativeLifecycle,
+          // Under concurrent turns the control path and the response-DOM read degrade together, so
+          // a terminal has to record both: whether control round trips were merely slow or absent,
+          // and whether the progress signal went stale because the turn idled or because its reads
+          // were failing.
+          onEvent: event => {
+            const native = getNativeLifecycle?.();
+            console.warn(
+              `[chatgpt-web] browser turn ${turn.traceId} control-liveness=${event.kind}`
+              + ` outstandingMs=${event.outstandingMs} sinceHealthyMs=${event.sinceHealthyMs}`
+              + ` progressing=${event.progressing} sinceProgressMs=${Date.now() - lastProgressAt}`
+              + ` domReadFailures=${domReadFailures}`
+              + ` sinceDomReadFailureMs=${lastDomReadFailureAt ? Date.now() - lastDomReadFailureAt : -1}`
+              + ` nativeStatus=${native?.status ?? "unavailable"}`
+              + ` nativeEvent=${native?.event ?? "unavailable"}`
+              + ` nativeRevision=${native?.revision ?? "unavailable"}`
+              + ` rendererPid=${native?.rendererPid ?? "unknown"}`
+              + ` surfaceId=${native?.surfaceId ?? launcherSurfaceId ?? "unavailable"}`,
+            );
+          },
         },
       );
       try {
@@ -2091,7 +2127,10 @@ export class ChatGptBrowserWorker {
               continue;
             }
 
-            const snapshot = await this.responseDomSnapshot(responseTurn);
+            const snapshot = await this.responseDomSnapshot(responseTurn, () => {
+              domReadFailures += 1;
+              lastDomReadFailureAt = Date.now();
+            });
             const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
             const running = await stop.isVisible().catch(() => false);
             if (running) sawRunning = true;
@@ -2187,6 +2226,7 @@ export class ChatGptBrowserWorker {
         ]);
       } finally {
         controlLiveness.stop();
+        console.info(`[chatgpt-web] browser turn ${turn.traceId} dom-read-summary failures=${domReadFailures}`);
       }
     } catch (error) {
       if (diagnosticPage && !diagnosticPage.isClosed()) {

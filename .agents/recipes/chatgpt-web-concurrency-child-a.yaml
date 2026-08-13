@@ -1,0 +1,26 @@
+version: "1.0.0"
+title: ChatGPT-Web Concurrency Child A
+description: Read-only BrowserHost concurrency qualification workload for child A.
+settings:
+  goose_provider: custom_chatgpt_web__local_1
+  goose_model: chatgpt-web/medium
+  max_turns: 12
+instructions: |
+  You are child A in a ChatGPT-Web concurrency qualification. Work only in the current repository.
+  Make no changes. Do not start, stop, restart, or inspect browser surfaces directly. Use the
+  inherited normal Goose tools; do not disable extensions. Complete the exact bounded workload in
+  the prompt, report six concise findings, and end with the exact terminal marker child-a-ok.
+prompt: |
+  Perform this read-only workload using at least three separate Goose Native shell calls:
+
+  1. Run `pwd` and `git status --short`.
+  2. Read `docs/architecture.md` and `docs/runtime-lifecycle.md`.
+  3. Read `src/adapters/chatgpt-web/control-liveness.ts` and locate the slow, recovered,
+     indeterminate, native-gone, and native-destroyed behavior.
+  4. Inspect the relevant lifecycle event handlers in `launcher/electron/browser-host.cjs`.
+  5. Report six concise findings covering ownership, heartbeat behavior, degraded recovery,
+     deterministic terminal evidence, indeterminate fallback, and renderer-PID semantics.
+
+  Make no modifications. End the final response with exactly:
+
+  child-a-ok

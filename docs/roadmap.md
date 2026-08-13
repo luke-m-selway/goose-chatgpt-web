@@ -67,3 +67,11 @@ reboot/login
 ```
 
 Do not perform this from a Goose turn that depends on the runtime being restarted.
+
+## Provisional Electron-native liveness qualification
+
+The current feature candidate and its committed qualification procedure are documented in
+[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md). Static/unit
+tests and a two-way slow→recovered live observation are evidence; the new deterministic ordinary-Goose
+three-surface proof and separate natural parent → two async children proof are still pending and must
+not be described as qualified before their exact procedures pass.

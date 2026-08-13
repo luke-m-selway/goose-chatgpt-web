@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
-import { startPostSendBrowserControlLiveness } from "../src/adapters/chatgpt-web/control-liveness";
+import {
+  startPostSendBrowserControlLiveness,
+  type PostSendBrowserNativeLifecycle,
+} from "../src/adapters/chatgpt-web/control-liveness";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { StandaloneRetryCircuit, standaloneRetrySnapshot } from "../src/adapters/chatgpt-web/retry-circuit";
 import { estimateChatGptWebInputTokens } from "../src/adapters/chatgpt-web/usage";
@@ -168,13 +171,13 @@ test("responsive post-send browser control can wait indefinitely without a gener
   }
 });
 
-test("post-send liveness requires repeated control failures and resets after a success", async () => {
-  const outcomes = [false, true, false, false];
+test("post-send liveness resets on any completed round trip and fails once they stop entirely", async () => {
+  const outcomes = [false, true];
   let probes = 0;
   const watch = startPostSendBrowserControlLiveness(
     async () => {
       probes += 1;
-      if (outcomes.shift() === false) throw new Error("synthetic CDP timeout");
+      if (outcomes.shift() !== true) throw new Error("synthetic CDP timeout");
       return true;
     },
     { intervalMs: 2, probeTimeoutMs: 10, maxConsecutiveFailures: 2 },
@@ -187,7 +190,244 @@ test("post-send liveness requires repeated control failures and resets after a s
     code: "chatgpt_browser_control_unresponsive",
     retryable: true,
   });
-  expect(probes).toBe(4);
+  // The single success in the middle cleared the streak, so the terminal needed a further full
+  // unresponsive budget of probe rounds that never completed.
+  expect(probes).toBeGreaterThan(2);
+});
+
+test("a control probe slower than the probe timeout is not a dead control path", async () => {
+  // The exact three-way regression: a sibling turn booting its ChatGPT surface stalls this turn's
+  // renderer past the probe timeout. Every probe still completes, so the turn must survive.
+  let probes = 0;
+  const watch = startPostSendBrowserControlLiveness(
+    async () => {
+      probes += 1;
+      await Bun.sleep(15);
+      return "complete";
+    },
+    {
+      intervalMs: 10,
+      probeTimeoutMs: 6,
+      maxConsecutiveFailures: 3,
+      indeterminateTimeoutMs: 100,
+      getNativeLifecycle: () => ({
+        traceId: "trace_slow_probe",
+        surfaceId: "surface_slow_probe_0123456789AB",
+        rendererPid: 4312,
+        status: "active",
+        event: "created",
+        revision: 0,
+      }),
+    },
+  );
+  try {
+    const result = await Promise.race([
+      watch.failure.then(() => "failed", () => "failed"),
+      Bun.sleep(200).then(() => "still-waiting"),
+    ]);
+    expect(result).toBe("still-waiting");
+    // One probe at a time: a slow probe is never abandoned and never has a replacement stacked
+    // behind it, so a stalled control path is not given more work to serialise.
+    expect(probes).toBeGreaterThanOrEqual(2);
+    expect(probes).toBeLessThanOrEqual(20);
+  } finally {
+    watch.stop();
+  }
+});
+
+test("a never-returning control path with no decisive native death has a bounded indeterminate terminal", async () => {
+  const events: string[] = [];
+  const watch = startPostSendBrowserControlLiveness(
+    () => new Promise<never>(() => {}),
+    {
+      intervalMs: 2,
+      probeTimeoutMs: 10,
+      maxConsecutiveFailures: 2,
+      indeterminateTimeoutMs: 20,
+      getNativeLifecycle: () => ({
+        traceId: "trace_indeterminate",
+        surfaceId: "surface_indeterminate_0123456789",
+        rendererPid: 8844,
+        status: "active",
+        event: "created",
+        revision: 0,
+      }),
+      onEvent: event => events.push(event.kind),
+    },
+  );
+  const startedAt = Date.now();
+  await expect(watch.failure).rejects.toMatchObject({
+    code: "chatgpt_browser_control_unresponsive",
+    retryable: true,
+    message: expect.stringContaining("prolonged indeterminate state"),
+  });
+  expect(events).toContain("indeterminate");
+  // Initial stale-evidence budget plus the explicit indeterminate fallback, with scheduler slack.
+  expect(Date.now() - startedAt).toBeLessThan(500);
+});
+
+test("post-send liveness reports slow, recovered and indeterminate control transitions", async () => {
+  const events: string[] = [];
+  let hang = false;
+  const watch = startPostSendBrowserControlLiveness(
+    async () => {
+      if (hang) return await new Promise<never>(() => {});
+      await Bun.sleep(15);
+      return "complete";
+    },
+    {
+      intervalMs: 10,
+      probeTimeoutMs: 6,
+      maxConsecutiveFailures: 3,
+      onEvent: event => events.push(event.kind),
+    },
+  );
+  try {
+    await Bun.sleep(100);
+    expect(events).toContain("slow");
+    expect(events).toContain("recovered");
+    hang = true;
+    await expect(watch.failure).rejects.toMatchObject({
+      code: "chatgpt_browser_control_unresponsive",
+    });
+    expect(events.at(-1)).toBe("indeterminate");
+  } finally {
+    watch.stop();
+  }
+});
+
+test("Electron unresponsive followed by responsive clears degraded state without terminating", async () => {
+  const events: string[] = [];
+  let lifecycle: PostSendBrowserNativeLifecycle = {
+    traceId: "trace_native_recovery",
+    surfaceId: "surface_native_recovery_01234567",
+    rendererPid: 5512,
+    status: "unresponsive",
+    event: "unresponsive",
+    revision: 1,
+  };
+  const watch = startPostSendBrowserControlLiveness(
+    () => new Promise<never>(() => {}),
+    {
+      intervalMs: 2,
+      probeTimeoutMs: 5,
+      maxConsecutiveFailures: 2,
+      indeterminateTimeoutMs: 200,
+      getNativeLifecycle: () => lifecycle,
+      onEvent: event => events.push(event.kind),
+    },
+  );
+  try {
+    await Bun.sleep(18);
+    lifecycle = {
+      ...lifecycle,
+      status: "active",
+      event: "responsive",
+      revision: 2,
+    };
+    await Bun.sleep(25);
+    expect(events).toContain("native-unresponsive");
+    expect(events).toContain("native-responsive");
+    const result = await Promise.race([
+      watch.failure.then(() => "failed", () => "failed"),
+      Bun.sleep(10).then(() => "still-waiting"),
+    ]);
+    expect(result).toBe("still-waiting");
+  } finally {
+    watch.stop();
+  }
+});
+
+test("renderer-gone and destroyed WebContents are deterministic native terminals", async () => {
+  for (const [status, event, code] of [
+    ["gone", "render-process-gone", "chatgpt_browser_renderer_gone"],
+    ["destroyed", "destroyed", "chatgpt_browser_web_contents_destroyed"],
+  ] as const) {
+    const watch = startPostSendBrowserControlLiveness(
+      async () => "healthy CDP must not override native death",
+      {
+        intervalMs: 2,
+        probeTimeoutMs: 10,
+        maxConsecutiveFailures: 2,
+        getNativeLifecycle: () => ({
+          traceId: `trace_${status}`,
+          surfaceId: `surface_${status}_0123456789ABCDEFGH`,
+          rendererPid: 9911,
+          status,
+          event,
+          revision: 1,
+          ...(status === "gone" ? { reason: "crashed" } : {}),
+        }),
+      },
+    );
+    await expect(watch.failure).rejects.toMatchObject({ code, retryable: true });
+  }
+});
+
+test("native lifecycle is turn-scoped and cannot terminate a sibling surface", async () => {
+  const goneWatch = startPostSendBrowserControlLiveness(
+    async () => true,
+    {
+      intervalMs: 2,
+      getNativeLifecycle: () => ({
+        traceId: "trace_gone_sibling",
+        surfaceId: "surface_gone_sibling_012345678",
+        rendererPid: 7001,
+        status: "gone",
+        event: "render-process-gone",
+        revision: 1,
+      }),
+    },
+  );
+  const liveWatch = startPostSendBrowserControlLiveness(
+    async () => true,
+    {
+      intervalMs: 2,
+      getNativeLifecycle: () => ({
+        traceId: "trace_live_sibling",
+        surfaceId: "surface_live_sibling_012345678",
+        rendererPid: 7002,
+        status: "active",
+        event: "created",
+        revision: 0,
+      }),
+    },
+  );
+  try {
+    await expect(goneWatch.failure).rejects.toMatchObject({ code: "chatgpt_browser_renderer_gone" });
+    const sibling = await Promise.race([
+      liveWatch.failure.then(() => "failed", () => "failed"),
+      Bun.sleep(25).then(() => "still-waiting"),
+    ]);
+    expect(sibling).toBe("still-waiting");
+  } finally {
+    goneWatch.stop();
+    liveWatch.stop();
+  }
+});
+
+test("renderer PID is correlation evidence and never sole proof of responsiveness", async () => {
+  const watch = startPostSendBrowserControlLiveness(
+    () => new Promise<never>(() => {}),
+    {
+      intervalMs: 2,
+      probeTimeoutMs: 5,
+      maxConsecutiveFailures: 2,
+      indeterminateTimeoutMs: 12,
+      getNativeLifecycle: () => ({
+        traceId: "trace_pid_only",
+        surfaceId: "surface_pid_only_0123456789ABCDE",
+        rendererPid: 999_999,
+        status: "active",
+        event: "created",
+        revision: 0,
+      }),
+    },
+  );
+  await expect(watch.failure).rejects.toMatchObject({
+    code: "chatgpt_browser_control_unresponsive",
+    message: expect.stringContaining("prolonged indeterminate state"),
+  });
 });
 
 test("diagnostic failures are outside the post-send liveness failure counter", async () => {

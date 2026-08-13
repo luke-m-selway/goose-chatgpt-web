@@ -633,7 +633,16 @@ test("a replacement helper takes over only after the previous owner exited", () 
 
   const lease = BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid);
 
-  assert.deepEqual(lease, { surfaceId: tab.surfaceId, tabId: tab.id });
+  assert.equal(lease.surfaceId, tab.surfaceId);
+  assert.equal(lease.tabId, tab.id);
+  assert.deepEqual(lease.lifecycle, {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: null,
+    status: "active",
+    event: "created",
+    revision: 1,
+  });
   assert.equal(tab.helperPid, process.pid);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0][0], "browser.stale_turn_owner_replaced");
@@ -643,6 +652,7 @@ test("a replacement helper takes over only after the previous owner exited", () 
 test("a live turn heartbeat refreshes its lease and rejects another helper", () => {
   const tab = {
     id: "tab-heartbeat",
+    surfaceId: "surface-heartbeat-0123456789ABCD",
     traceId: "trace_heartbeat",
     helperPid: 444,
     status: "running",
@@ -651,18 +661,165 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]),
     closedTurnOwners: new Map(),
-    snapshot: () => ({ activeTabId: tab.id }),
   });
 
   const before = Date.now();
-  const snapshot = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid);
+  const lifecycle = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid);
 
-  assert.deepEqual(snapshot, { activeTabId: tab.id });
+  assert.deepEqual(lifecycle, {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: null,
+    status: "active",
+    event: "created",
+    revision: 0,
+  });
   assert.ok(tab.lastHeartbeatAt >= before);
   assert.throws(
     () => BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, 445),
     /ownership mismatch: expected 444, received 445/,
   );
+});
+
+function lifecycleContents(rendererPid) {
+  const contents = new EventEmitter();
+  let destroyed = false;
+  Object.assign(contents, {
+    setWindowOpenHandler() {},
+    getURL: () => "https://chatgpt.com/?temporary-chat=true",
+    getOSProcessId: () => rendererPid,
+    isDestroyed: () => destroyed,
+    insertCSS: async () => "css-key",
+    executeJavaScript: async () => {},
+    close() {
+      destroyed = true;
+      contents.emit("destroyed");
+    },
+    markDestroyed() { destroyed = true; },
+  });
+  return contents;
+}
+
+function lifecycleFixture(tabs) {
+  return Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(tabs.map(tab => [tab.id, tab])),
+    closedTurnOwners: new Map(),
+    closedTurnLifecycles: new Map(),
+    selectedTabId: tabs[0]?.id || "home",
+    window: { contentView: { removeChildView() {} } },
+    view: { webContents: { getURL: () => "about:blank#codex-web-gpt-browser-host" } },
+    syncViewVisibility() {},
+    hide() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    logger: { info() {}, warn() {}, error() {} },
+  });
+}
+
+function lifecycleTab(id, traceId, surfaceId, helperPid, rendererPid) {
+  return {
+    id,
+    traceId,
+    surfaceId,
+    helperPid,
+    status: "running",
+    lastHeartbeatAt: 1,
+    rendererPid,
+    view: { webContents: lifecycleContents(rendererPid) },
+  };
+}
+
+test("Electron unresponsive and responsive events degrade then recover the owned turn", () => {
+  const tab = lifecycleTab(
+    "tab-native-recovery",
+    "trace_native_recovery",
+    "surface_native_recovery_01234567",
+    700,
+    8123,
+  );
+  const fixture = lifecycleFixture([tab]);
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  tab.view.webContents.emit("unresponsive");
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid), {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: 8123,
+    status: "unresponsive",
+    event: "unresponsive",
+    revision: 1,
+  });
+
+  tab.view.webContents.emit("responsive");
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid), {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: 8123,
+    status: "active",
+    event: "responsive",
+    revision: 2,
+  });
+});
+
+test("renderer-gone is retained as deterministic trace/surface-scoped terminal evidence", () => {
+  const failed = lifecycleTab(
+    "tab-renderer-gone",
+    "trace_renderer_gone",
+    "surface_renderer_gone_012345678",
+    701,
+    8124,
+  );
+  const sibling = lifecycleTab(
+    "tab-renderer-live",
+    "trace_renderer_live",
+    "surface_renderer_live_012345678",
+    701,
+    8125,
+  );
+  const fixture = lifecycleFixture([failed, sibling]);
+  BrowserHost.prototype.bindTurnContents.call(fixture, failed);
+
+  failed.view.webContents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 9 });
+
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, failed.traceId, failed.helperPid), {
+    traceId: failed.traceId,
+    surfaceId: failed.surfaceId,
+    rendererPid: 8124,
+    status: "gone",
+    event: "render-process-gone",
+    revision: 1,
+    reason: "crashed",
+  });
+  assert.equal(
+    BrowserHost.prototype.heartbeatTurn.call(fixture, sibling.traceId, sibling.helperPid).status,
+    "active",
+  );
+  assert.equal(fixture.turnTabs.has(sibling.id), true);
+});
+
+test("destroyed owned WebContents is retained as deterministic terminal evidence", () => {
+  const tab = lifecycleTab(
+    "tab-destroyed",
+    "trace_destroyed",
+    "surface_destroyed_0123456789AB",
+    702,
+    8126,
+  );
+  const fixture = lifecycleFixture([tab]);
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  tab.view.webContents.markDestroyed();
+  tab.view.webContents.emit("destroyed");
+
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid), {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: 8126,
+    status: "destroyed",
+    event: "destroyed",
+    revision: 1,
+  });
 });
 
 test("bootstrap and heartbeat expiry reap orphan turn surfaces", () => {
@@ -1097,7 +1254,18 @@ test("a later provider round reuses its task tab and restores active ownership",
 
   const lease = BrowserHost.prototype.beginTurn.call(fixture, "trace_reused", false, 222);
 
-  assert.deepEqual(lease, { surfaceId: "surface-reused", tabId: "tab-reused" });
+  assert.deepEqual(lease, {
+    surfaceId: "surface-reused",
+    tabId: "tab-reused",
+    lifecycle: {
+      traceId: "trace_reused",
+      surfaceId: "surface-reused",
+      rendererPid: null,
+      status: "active",
+      event: "created",
+      revision: 1,
+    },
+  });
   assert.equal(tab.helperPid, 222);
   assert.equal(tab.status, "running");
   assert.equal(tab.loading, true);

@@ -116,13 +116,13 @@ class BrowserControlServer {
       const preferences = this.getPreferences();
       if (request.url === "/v1/turn/start") {
         const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
-        this.logger.info("browser.turn_started", { traceId: body.traceId });
+        this.logger.info("browser.turn_started", { traceId: body.traceId, lifecycle: lease.lifecycle });
         writeJson(response, 200, { ok: true, ...lease });
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
-        host.heartbeatTurn(body.traceId, body.helperPid);
-        this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
-        writeJson(response, 200, { ok: true });
+        const lifecycle = host.heartbeatTurn(body.traceId, body.helperPid);
+        this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId, lifecycle });
+        writeJson(response, 200, { ok: true, lifecycle });
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");

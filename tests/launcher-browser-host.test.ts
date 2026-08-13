@@ -15,6 +15,7 @@ import {
   ensureLauncherAutomationViewport,
   inspectLauncherBrowserHost,
   launcherAutomationViewportRequired,
+  type LauncherTurnLifecycleState,
   probeLauncherBrowserHost,
   type LauncherViewportSize,
   notifyLauncherTurn,
@@ -77,6 +78,14 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
   expect(LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).toBe(5_000);
   expect(LAUNCHER_TURN_END_TIMEOUT_MS).toBe(15_000);
   let received: { authorization?: string; body?: unknown } = {};
+  const lifecycle: LauncherTurnLifecycleState = {
+    traceId: "abc123def456",
+    surfaceId: "launcher_surface_id_0123456789AB",
+    rendererPid: 4321,
+    status: "active",
+    event: "created",
+    revision: 0,
+  };
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -85,9 +94,11 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
     };
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(request.url === "/v1/turn/start"
-      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB"}\n'
-      : '{"ok":true}\n');
+    response.end(JSON.stringify(request.url === "/v1/turn/start"
+      ? { ok: true, surfaceId: "launcher_surface_id_0123456789AB", lifecycle }
+      : request.url === "/v1/turn/heartbeat"
+        ? { ok: true, lifecycle }
+        : { ok: true }));
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -101,14 +112,14 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       phase: "start",
       traceId: "abc123def456",
       helperPid: process.pid,
-    })).resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB" });
+    })).resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB", lifecycle });
     expect(received.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
     expect(received.body).toEqual({ phase: "start", traceId: "abc123def456", helperPid: process.pid });
-    await notifyLauncherTurn(path, {
+    await expect(notifyLauncherTurn(path, {
       phase: "heartbeat",
       traceId: "abc123def456",
       helperPid: process.pid,
-    });
+    })).resolves.toEqual({ lifecycle });
     expect(received.body).toEqual({ phase: "heartbeat", traceId: "abc123def456", helperPid: process.pid });
     await notifyLauncherTurn(path, {
       phase: "end",

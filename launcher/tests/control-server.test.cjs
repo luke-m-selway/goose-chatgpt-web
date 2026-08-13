@@ -5,16 +5,28 @@ const { BrowserControlServer } = require("../electron/control-server.cjs");
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];
+  const lifecycle = {
+    traceId: "abcdef123456",
+    surfaceId: "launcher_surface_id_0123456789AB",
+    rendererPid: 4567,
+    status: "active",
+    event: "created",
+    revision: 0,
+  };
   const host = {
     beginTurn: (...args) => {
       calls.push(["start", ...args]);
-      return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1" };
+      return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", lifecycle };
     },
-    heartbeatTurn: (...args) => calls.push(["heartbeat", ...args]),
+    heartbeatTurn: (...args) => {
+      calls.push(["heartbeat", ...args]);
+      return lifecycle;
+    },
     endTurn: (...args) => calls.push(["end", ...args]),
   };
   const server = await new BrowserControlServer({
     logger: {
+      debug: (event, detail) => logs.push(["debug", event, detail]),
       info: (event, detail) => logs.push(["info", event, detail]),
       warn: (event, detail) => logs.push(["warn", event, detail]),
     },
@@ -50,6 +62,7 @@ test("browser control server authenticates and owns turn visibility", async () =
       body: JSON.stringify({ phase: "heartbeat", traceId: "abcdef123456", helperPid: process.pid }),
     });
     assert.equal(heartbeat.status, 200);
+    assert.deepEqual(await heartbeat.json(), { ok: true, lifecycle });
 
     const ownerlessEnd = await fetch(`${descriptor.endpoint}/v1/turn/end`, {
       method: "POST",
@@ -74,7 +87,12 @@ test("browser control server authenticates and owns turn visibility", async () =
       ["heartbeat", "abcdef123456", process.pid],
       ["end", "abcdef123456", process.pid, "completed", true, undefined],
     ]);
-    assert.equal(logs.some(([, event]) => event === "browser.turn_started"), true);
+    assert.equal(logs.some(([, event, detail]) => (
+      event === "browser.turn_started" && detail.lifecycle === lifecycle
+    )), true);
+    assert.equal(logs.some(([, event, detail]) => (
+      event === "browser.turn_heartbeat" && detail.lifecycle === lifecycle
+    )), true);
     assert.equal(logs.some(([, event]) => event === "browser.turn_ended"), true);
   } finally {
     await server.close();

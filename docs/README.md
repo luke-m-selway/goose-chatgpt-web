@@ -29,6 +29,8 @@ The qualified runtime base is the Electron checkpoint `c624274` plus current-mai
 
 The actual Mac **reboot/login → automatic reconstruction → ordinary Goose first turn → separate dependent `--resume`** proof has not been run. Ordered autostart is implemented and live-checked without that reboot boundary.
 
+[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md) defines the committed qualification checkpoint for the Electron-native liveness implementation candidate. Its static/unit coverage and two-way slow→recovered observation exist; the deterministic three-surface and natural parent → two async children proofs remain pending.
+
 No document may silently upgrade that item to proven status.
 
 ## Deferred
