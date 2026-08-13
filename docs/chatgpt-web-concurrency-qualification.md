@@ -5,6 +5,25 @@ parent/delegate attempt nevertheless produced useful two-way live evidence in wh
 probes recovered and BrowserHost heartbeats continued. The committed deterministic three-surface
 proof and the separate natural parent → two async children proof remain **NOT RUN / pending**.
 
+Independent review of PR #31 recorded these gates:
+
+- native liveness design: **PASS**;
+- the roughly 76–80 second stale-control plus prolonged-indeterminate model: **PASS**;
+- exact source/runtime revision match at the runtime reviewed on 2026-08-13: **FAIL**;
+- qualification analyzer/runner correctness: repairs were required before any live proof.
+
+Those analyzer/runner repairs are now part of the candidate, but no live proof has been run against
+them. The reviewed runtime is not eligible for a qualification baseline: its helper and Electron
+processes predated committed liveness evidence. One operator-controlled exact-revision activation
+and the content-based preflight below are mandatory before the next baseline.
+
+For reviewed commit `7b998fbaa82adbf5b400c50248478c272b057761`, **CURRENT RUNTIME MATCHES
+COMMIT: NO**. The active helper lacked `dom-read-summary failures=` and `nativeRevision=`, the
+BrowserHost process predated the committed BrowserHost/control-server writes, and post-start logs did
+not contain the committed lifecycle object on `browser.turn_started`. This is an operational revision
+mismatch, not a native-liveness design failure. It must be repaired only at the next authorized
+operator activation boundary; no restart was performed while recording or repairing this checkpoint.
+
 This document is the operating procedure for qualifying the current Electron-native liveness
 candidate. It deliberately separates BrowserHost three-surface liveness from recursive Goose
 delegation behavior.
@@ -26,6 +45,102 @@ gap and cannot qualify a run.
 The baseline records machine-readable timestamps, process identities, helper executable/script and
 SHA-256 identity, log positions, and pre-existing Goose session IDs. A baseline is clean only when
 the launcher log has no unmatched `browser.turn_started` event.
+
+`indeterminate` means the recoverable prolonged-indeterminate grace window opened. A delayed probe,
+DOM progress, or native `responsive` event may still recover the turn. Only
+`indeterminate-terminal` means that grace was exhausted; the analyzer treats only the latter as
+terminal control-liveness evidence.
+
+## Mandatory exact-revision activation and preflight
+
+This is an **operator-only, disruptive prerequisite**, not part of `baseline`, `analyze`, or the
+qualification runner. Do not perform it from a turn using the runtime being restarted. Replace the
+placeholder with the exact reviewed repair commit; every check is fail-closed.
+
+```bash
+qualification_repo="/Users/luke/Documents/goose-chatgpt-web"
+qualification_runtime_home="/Users/luke/.goose-chatgpt-web-dev"
+qualification_commit="<exact-reviewed-repair-commit-sha>"
+qualification_launcher_log="/Users/luke/Library/Logs/Codex Web GPT/launcher.jsonl"
+
+cd "$qualification_repo"
+test "$(git rev-parse HEAD)" = "$qualification_commit"
+git diff --quiet
+git diff --cached --quiet
+test "$(git hash-object launcher/electron/browser-host.cjs)" = \
+  "$(git rev-parse "${qualification_commit}:launcher/electron/browser-host.cjs")"
+test "$(git hash-object launcher/electron/control-server.cjs)" = \
+  "$(git rev-parse "${qualification_commit}:launcher/electron/control-server.cjs")"
+
+qualification_config="$qualification_runtime_home/config.json"
+jq -e --arg entry "$qualification_repo/src/cli.ts" \
+  '.runtimeCommand | index($entry) != null' "$qualification_config" >/dev/null
+
+qualification_helper="$qualification_repo/.launcher-runtime/browser-helper.cjs"
+bun run scripts/build-browser-helper.ts "$qualification_helper"
+qualification_expected_helper_sha256="$(shasum -a 256 "$qualification_helper" | awk '{print $1}')"
+qualification_activation_utc="$(bun -e 'process.stdout.write(new Date().toISOString())')"
+
+CODEX_CHATGPT_WEB_HOME="$qualification_runtime_home" \
+  bun run src/cli.ts lifecycle restart
+
+qualification_descriptor="$(jq -r '.browserHostDescriptorPath' "$qualification_config")"
+qualification_descriptor_helper="$(jq -r '.helper.script' "$qualification_descriptor")"
+test "$qualification_descriptor_helper" = "$qualification_helper"
+qualification_actual_helper_sha256="$(shasum -a 256 "$qualification_descriptor_helper" | awk '{print $1}')"
+test "$qualification_actual_helper_sha256" = "$qualification_expected_helper_sha256"
+rg -F 'dom-read-summary failures=' "$qualification_descriptor_helper"
+rg -F 'nativeRevision=' "$qualification_descriptor_helper"
+rg -F 'indeterminate-terminal' "$qualification_descriptor_helper"
+
+qualification_daemon_pid="$(launchctl print "gui/$(id -u)/io.github.codex-chatgpt-web.daemon" \
+  | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
+test -n "$qualification_daemon_pid"
+ps -p "$qualification_daemon_pid" -o command= | rg -F "$qualification_repo/src/cli.ts"
+
+qualification_browser_pid="$(jq -r '.pid' "$qualification_descriptor")"
+test -n "$qualification_browser_pid"
+qualification_browser_cwd="$(lsof -a -p "$qualification_browser_pid" -d cwd -Fn \
+  | sed -n 's/^n//p')"
+test "$qualification_browser_cwd" = "$qualification_repo/launcher"
+
+jq -e --arg activated "$qualification_activation_utc" '
+  select(
+    .at >= $activated
+    and .event == "browser.turn_started"
+    and .detail.lifecycle.status == "active"
+    and .detail.lifecycle.event == "created"
+    and (.detail.lifecycle.surfaceId | type == "string")
+    and (.detail.lifecycle | has("rendererPid"))
+    and (.detail.lifecycle.revision | type == "number")
+  )
+' "$qualification_launcher_log" >/dev/null
+
+CODEX_CHATGPT_WEB_HOME="$qualification_runtime_home" \
+  bun run src/cli.ts lifecycle status
+
+qualification_preflight_dir="$qualification_runtime_home/qualification/preflight-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$qualification_preflight_dir"
+jq -n \
+  --arg commit "$qualification_commit" \
+  --arg activatedAt "$qualification_activation_utc" \
+  --arg helperPath "$qualification_descriptor_helper" \
+  --arg helperSha256 "$qualification_actual_helper_sha256" \
+  --arg daemonPid "$qualification_daemon_pid" \
+  --arg browserHostPid "$qualification_browser_pid" \
+  --arg browserHostCwd "$qualification_browser_cwd" \
+  '{commit:$commit, activatedAt:$activatedAt, helperPath:$helperPath,
+    helperSha256:$helperSha256, daemonPid:($daemonPid|tonumber),
+    browserHostPid:($browserHostPid|tonumber), browserHostCwd:$browserHostCwd}' \
+  >"$qualification_preflight_dir/exact-revision.json"
+```
+
+The explicit helper build establishes the expected content hash. Canonical `lifecycle restart`, run
+from this checkout, rebuilds/starts the development Electron BrowserHost and restarts the daemon in
+canonical order. Matching descriptor hash, exact source blobs, daemon command, Electron working
+directory, and post-activation lifecycle-aware start evidence prove content identity and origin;
+mtime alone is never accepted. Retain `exact-revision.json` beside the later run artifacts. If any
+command fails, stop: do not establish a baseline or run a qualification.
 
 ## Standalone monitor commands
 
@@ -52,8 +167,9 @@ returns non-zero when the evidence does not qualify the run.
 
 The analyzer reports all post-baseline ChatGPT-Web traces, new Goose sessions, surface/renderer
 identity, native lifecycle, control-liveness, DOM-read counts, heartbeats, start/end/release,
-process changes, 429/rate-limit evidence, reliable broker/session tool calls, pairwise overlap, and
-the all-trace common overlap.
+process changes, 429/rate-limit evidence, reliable broker/session tool calls, the final persisted
+assistant text, narrowly retained delegate `source`/`async` fields, pairwise overlap, and the
+all-trace common overlap.
 
 ## Deterministic ordinary-Goose three-surface proof
 
@@ -67,8 +183,11 @@ The committed runner launches three independent, ordinary `goose run` processes 
 Each recipe requires a bounded read-only repository workload, at least three separate Goose Native
 shell calls, and an exact terminal marker. The runner launches them in immediate succession, records
 the measured launch spread, retains their Goose session IDs/results, waits for terminal exit, checks
-that Git status is byte-for-byte unchanged, and invokes the same analyzer. It writes artifacts only
-under the chosen external output directory.
+that Git status is byte-for-byte unchanged, and invokes the same analyzer. A marker qualifies only
+when the last line of the final assistant message persisted in Goose's `messages` table equals the
+expected marker. Occurrence in prompt/user/tool/stream output is not evidence. Stdout/stderr remain
+diagnostic artifacts only. The runner writes artifacts only under the chosen external output
+directory.
 
 Run only at an explicitly authorised live-test boundary:
 
@@ -81,12 +200,17 @@ Optional `--output-dir` and `--timeout-ms` select an external artifact directory
 On timeout the runner interrupts only the three Goose processes it created; it never terminates the
 daemon, BrowserHost, helper, tunnel, or a renderer directly.
 
-A pass requires exactly three complete/ready traces, a non-zero common overlap, Goose Native shell
-evidence for every trace, native active/surface/renderer identity and at least one BrowserHost
-heartbeat for every trace, stable daemon/BrowserHost/tunnel/broker identities, persisted Goose
-provider/model/shell evidence matching each runner session, no deterministic native terminal, no
-prolonged indeterminate terminal, no 429, intact log continuity, all three terminal markers,
-captured Goose session IDs, and unchanged repository status.
+A pass requires exactly three complete/ready traces, at least **10,000 ms** of measured common
+three-way overlap, Goose Native shell evidence for every trace, native active/surface/renderer
+identity and at least one BrowserHost heartbeat for every trace, stable
+daemon/BrowserHost/tunnel/broker identities, persisted Goose provider/model/shell evidence matching
+each runner session, no deterministic native terminal, no `indeterminate-terminal`, no structured
+429/rate-limit evidence, intact log continuity, all three persisted final-assistant markers,
+captured Goose session IDs, and unchanged repository status. Recoverable `indeterminate` entry by
+itself does not fail a run.
+
+429 scanning recognizes explicit HTTP 429/status fields plus `Too Many Requests` and rate-limit
+phrases. Bare decimal timings such as `429.955µs` and `8.429µs` are not 429 evidence.
 
 This proves **Electron/BrowserHost three-surface liveness under real ordinary Goose load**. It does
 not prove recursive parent-to-child delegation.
@@ -150,8 +274,27 @@ parent must verify both IDs, do independent shell/read/reasoning work while both
 then `load` both IDs. Missing `async: true`, a synchronous result, or failure to obtain both IDs makes
 the attempt **INVALID**, not a BrowserHost-liveness failure.
 
-This final test qualifies the natural recursive topology only when monitor evidence also proves the
-parent and both children genuinely overlapped and all three used Goose Native shell.
+For a valid natural proof, retain and verify all of the following:
+
+- exactly two persisted parent `delegate` calls;
+- `source` equals `chatgpt-web-concurrency-child-a` and
+  `chatgpt-web-concurrency-child-b`, once each;
+- persisted `async: true` on both calls;
+- two distinct returned child task/session IDs and the matching child sessions;
+- parent-owned shell/read/reasoning work persisted before either `load` call;
+- final persisted assistant messages ending in `child-a-ok`, `child-b-ok`, and
+  `natural-parent-ok` for the matching sessions;
+- exactly three ChatGPT-Web traces with at least 10,000 ms common overlap and Goose Native shell
+  evidence for every trace.
+
+The monitor now retains the safe persisted delegate `source`/`async` fields and final assistant text
+in `analysis.json`. It still does not independently bind every BrowserHost trace to a Goose session,
+prove returned task-ID identity, or score parent-work-before-load ordering. Those remain explicit
+natural-proof evidence requirements to verify from persisted Goose session/tool-result artifacts;
+the generic analyzer verdict alone must not be presented as recursive-topology proof.
+
+This final test qualifies the natural recursive topology only when the monitor evidence and every
+persisted-topology requirement above agree.
 
 ## Evidence already observed
 

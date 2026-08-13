@@ -262,11 +262,53 @@ test("a never-returning control path with no decisive native death has a bounded
     message: expect.stringContaining("prolonged indeterminate state"),
   });
   expect(events).toContain("indeterminate");
+  expect(events.at(-1)).toBe("indeterminate-terminal");
   // Initial stale-evidence budget plus the explicit indeterminate fallback, with scheduler slack.
   expect(Date.now() - startedAt).toBeLessThan(500);
 });
 
-test("post-send liveness reports slow, recovered and indeterminate control transitions", async () => {
+test("a delayed probe can recover after indeterminate grace entry without terminal evidence", async () => {
+  const events: string[] = [];
+  let probes = 0;
+  const watch = startPostSendBrowserControlLiveness(
+    async () => {
+      probes += 1;
+      if (probes === 1) await Bun.sleep(35);
+      return true;
+    },
+    {
+      intervalMs: 2,
+      probeTimeoutMs: 5,
+      maxConsecutiveFailures: 2,
+      indeterminateTimeoutMs: 200,
+      getNativeLifecycle: () => ({
+        traceId: "trace_delayed_recovery",
+        surfaceId: "surface_delayed_recovery_0123456",
+        rendererPid: 8845,
+        status: "active",
+        event: "created",
+        revision: 0,
+      }),
+      onEvent: event => events.push(event.kind),
+    },
+  );
+  try {
+    await Bun.sleep(70);
+    expect(events).toContain("slow");
+    expect(events).toContain("indeterminate");
+    expect(events).toContain("recovered");
+    expect(events).not.toContain("indeterminate-terminal");
+    const result = await Promise.race([
+      watch.failure.then(() => "failed", () => "failed"),
+      Bun.sleep(10).then(() => "still-waiting"),
+    ]);
+    expect(result).toBe("still-waiting");
+  } finally {
+    watch.stop();
+  }
+});
+
+test("post-send liveness reports slow, recovered and indeterminate-terminal control transitions", async () => {
   const events: string[] = [];
   let hang = false;
   const watch = startPostSendBrowserControlLiveness(
@@ -290,7 +332,7 @@ test("post-send liveness reports slow, recovered and indeterminate control trans
     await expect(watch.failure).rejects.toMatchObject({
       code: "chatgpt_browser_control_unresponsive",
     });
-    expect(events.at(-1)).toBe("indeterminate");
+    expect(events.at(-1)).toBe("indeterminate-terminal");
   } finally {
     watch.stop();
   }
@@ -327,7 +369,9 @@ test("Electron unresponsive followed by responsive clears degraded state without
     };
     await Bun.sleep(25);
     expect(events).toContain("native-unresponsive");
+    expect(events).toContain("indeterminate");
     expect(events).toContain("native-responsive");
+    expect(events).not.toContain("indeterminate-terminal");
     const result = await Promise.race([
       watch.failure.then(() => "failed", () => "failed"),
       Bun.sleep(10).then(() => "still-waiting"),

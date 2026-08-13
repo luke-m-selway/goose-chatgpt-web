@@ -11,6 +11,7 @@ import { runCommand } from "../process";
 
 export const CHATGPT_WEB_QUALIFICATION_VERSION = 1;
 export const DEFAULT_EXPECTED_TRACE_COUNT = 3;
+export const MINIMUM_COMMON_OVERLAP_MS = 10_000;
 
 const DAEMON_LABEL = "io.github.codex-chatgpt-web.daemon";
 const TUNNEL_LABEL = "io.github.codex-chatgpt-web.tunnel";
@@ -74,7 +75,8 @@ export interface ControlLivenessEvent {
     | "native-responsive"
     | "native-gone"
     | "native-destroyed"
-    | "indeterminate";
+    | "indeterminate"
+    | "indeterminate-terminal";
   outstandingMs: number | null;
   sinceHealthyMs: number | null;
   progressing: boolean | null;
@@ -118,6 +120,12 @@ export interface GooseToolCallEvidence {
   createdAt: string | null;
 }
 
+export interface GooseDelegateCallEvidence {
+  source: string | null;
+  async: boolean | null;
+  createdAt: string | null;
+}
+
 export interface GooseSessionEvidence {
   id: string;
   name: string;
@@ -129,6 +137,11 @@ export interface GooseSessionEvidence {
   provider: string | null;
   model: string | null;
   toolCalls: GooseToolCallEvidence[];
+  delegateCalls: GooseDelegateCallEvidence[];
+  finalAssistantMessage: {
+    createdAt: string | null;
+    text: string;
+  } | null;
 }
 
 export interface QualificationRunSession {
@@ -160,6 +173,23 @@ export interface QualificationRunManifest {
   sessions: QualificationRunSession[];
 }
 
+export function qualificationRunTiming(
+  sessions: Array<Pick<QualificationRunSession, "launchedAt">>,
+  fallbackAt: string,
+): { launchedAt: string; launchSpreadMs: number } {
+  const launchTimes = sessions
+    .map(session => Date.parse(session.launchedAt))
+    .filter(Number.isFinite);
+  if (launchTimes.length === 0) {
+    return { launchedAt: fallbackAt, launchSpreadMs: 0 };
+  }
+  const earliest = Math.min(...launchTimes);
+  return {
+    launchedAt: new Date(earliest).toISOString(),
+    launchSpreadMs: Math.max(...launchTimes) - earliest,
+  };
+}
+
 export interface OverlapWindow {
   traces: string[];
   startAt: string | null;
@@ -188,6 +218,7 @@ export interface QualificationAnalysis {
   baselineCapturedAt: string;
   verdict: "qualified" | "not-qualified";
   expectedTraceCount: number;
+  minimumCommonOverlapMs: number;
   traces: TraceEvidence[];
   gooseSessions: GooseSessionEvidence[];
   processChanges: ProcessChange[];
@@ -600,6 +631,11 @@ function traceIdFromLine(line: string): string | null {
   return /(?:browser turn\s+|broker trace=)([A-Za-z0-9_-]+)/.exec(line)?.[1] ?? null;
 }
 
+function isRateLimitEvidence(line: string): boolean {
+  if (/(?:too many requests|rate[-_ ]?limit(?:ed|ing)?\b)/i.test(line)) return true;
+  return /(?:\bHTTP(?:\/\d(?:\.\d)?)?\s+|["']?(?:status|statusCode|httpStatus)["']?\s*[:=]\s*)429(?![.\w])/i.test(line);
+}
+
 export function parseDaemonEvidence(
   text: string,
   traces = new Map<string, MutableTrace>(),
@@ -607,7 +643,7 @@ export function parseDaemonEvidence(
 ): { traces: Map<string, MutableTrace>; rateLimits: RateLimitEvidence[] } {
   const rateLimits: RateLimitEvidence[] = [];
   for (const [index, line] of text.split(/\r?\n/).entries()) {
-    if (/(?:\b429\b|too many requests|rate[-_ ]?limit)/i.test(line)) {
+    if (isRateLimitEvidence(line)) {
       rateLimits.push({ source, line: index + 1, traceId: traceIdFromLine(line) });
     }
     const control = /browser turn ([A-Za-z0-9_-]+) control-liveness=([A-Za-z-]+)/.exec(line);
@@ -615,7 +651,16 @@ export function parseDaemonEvidence(
       const trace = traceFor(traces, control[1]);
       const values = keyValues(line);
       const kind = control[2] as ControlLivenessEvent["kind"];
-      if (["slow", "recovered", "native-unresponsive", "native-responsive", "native-gone", "native-destroyed", "indeterminate"].includes(kind)) {
+      if ([
+        "slow",
+        "recovered",
+        "native-unresponsive",
+        "native-responsive",
+        "native-gone",
+        "native-destroyed",
+        "indeterminate",
+        "indeterminate-terminal",
+      ].includes(kind)) {
         const domReadFailures = nullableInteger(values.domReadFailures);
         trace.controlLiveness.push({
           kind,
@@ -727,6 +772,48 @@ function toolCallsFromContent(contentJson: string, createdAt: string | null): Go
   });
 }
 
+function delegateCallsFromContent(contentJson: string, createdAt: string | null): GooseDelegateCallEvidence[] {
+  let content: unknown;
+  try { content = JSON.parse(contentJson); } catch { return []; }
+  if (!Array.isArray(content)) return [];
+  return content.flatMap(item => {
+    if (!item || typeof item !== "object") return [];
+    const value = (item as {
+      toolCall?: { value?: { name?: unknown; arguments?: unknown } };
+    }).toolCall?.value;
+    if (typeof value?.name !== "string" || !/(?:^|__)delegate$/.test(value.name)) return [];
+    const args = value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
+      ? value.arguments as Record<string, unknown>
+      : {};
+    return [{
+      source: scalarString(args.source),
+      async: typeof args.async === "boolean" ? args.async : null,
+      createdAt,
+    }];
+  });
+}
+
+function assistantTextFromContent(contentJson: string): string | null {
+  let content: unknown;
+  try { content = JSON.parse(contentJson); } catch { return null; }
+  if (!Array.isArray(content)) return null;
+  const text = content.flatMap(item => (
+    item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string"
+      ? [(item as { text: string }).text]
+      : []
+  )).join("\n");
+  return text || null;
+}
+
+export function finalAssistantHasTerminalMarker(
+  session: GooseSessionEvidence | undefined,
+  expectedMarker: string,
+): boolean {
+  const text = session?.finalAssistantMessage?.text;
+  if (!text) return false;
+  return text.trimEnd().split(/\r?\n/).at(-1)?.trim() === expectedMarker;
+}
+
 export function readNewGooseSessions(baseline: QualificationBaseline): GooseSessionEvidence[] {
   const path = baseline.gooseSessionsDatabase;
   if (!existsSync(path)) return [];
@@ -748,6 +835,10 @@ export function readNewGooseSessions(baseline: QualificationBaseline): GooseSess
     return sessions.filter(session => typeof session.id === "string" && !existing.has(session.id)).map(session => {
       const id = String(session.id);
       const messages = messageQuery.all(id) as Array<{ content_json: string; created_at: string | null }>;
+      const finalAssistant = messages.at(-1);
+      const finalAssistantText = finalAssistant
+        ? assistantTextFromContent(finalAssistant.content_json)
+        : null;
       return {
         id,
         name: String(session.name ?? ""),
@@ -759,6 +850,11 @@ export function readNewGooseSessions(baseline: QualificationBaseline): GooseSess
         provider: scalarString(session.provider_name),
         model: parseModel(session.model_config_json),
         toolCalls: messages.flatMap(message => toolCallsFromContent(message.content_json, message.created_at)),
+        delegateCalls: messages.flatMap(message => delegateCallsFromContent(message.content_json, message.created_at)),
+        finalAssistantMessage: finalAssistantText === null ? null : {
+          createdAt: finalAssistant?.created_at ?? null,
+          text: finalAssistantText,
+        },
       };
     });
   } finally {
@@ -809,6 +905,7 @@ export function analyzeEvidence(options: {
   gooseSessions?: GooseSessionEvidence[];
   runManifest?: QualificationRunManifest | null;
   expectedTraceCount?: number;
+  minimumCommonOverlapMs?: number;
   now?: Date;
 }): QualificationAnalysis {
   const traces = new Map<string, MutableTrace>();
@@ -821,13 +918,18 @@ export function analyzeEvidence(options: {
   }
   const finalizedTraces = finalizeTraces(traces);
   const expectedTraceCount = options.expectedTraceCount ?? options.runManifest?.sessions.length ?? DEFAULT_EXPECTED_TRACE_COUNT;
+  const minimumCommonOverlapMs = options.minimumCommonOverlapMs ?? MINIMUM_COMMON_OVERLAP_MS;
   const commonOverlap = overlapWindow(finalizedTraces);
   const processChanges = compareProcesses(options.baseline.processes, options.currentProcesses);
   const issues: string[] = [];
   if (finalizedTraces.length !== expectedTraceCount) {
     issues.push(`Expected exactly ${expectedTraceCount} ChatGPT-Web traces, observed ${finalizedTraces.length}`);
   }
-  if (commonOverlap.durationMs <= 0) issues.push("No common overlap window exists across all observed traces");
+  if (commonOverlap.durationMs < minimumCommonOverlapMs) {
+    issues.push(
+      `Common overlap was ${commonOverlap.durationMs}ms, below the required ${minimumCommonOverlapMs}ms`,
+    );
+  }
   for (const trace of finalizedTraces) {
     if (!trace.startedAt) issues.push(`Trace ${trace.traceId} has no BrowserHost start evidence`);
     if (!trace.endedAt) issues.push(`Trace ${trace.traceId} has no BrowserHost end evidence`);
@@ -849,7 +951,11 @@ export function analyzeEvidence(options: {
     if (trace.lifecycle.some(item => item.status === "gone" || item.status === "destroyed")) {
       issues.push(`Trace ${trace.traceId} has deterministic native terminal evidence`);
     }
-    if (trace.controlLiveness.some(item => item.kind === "native-gone" || item.kind === "native-destroyed" || item.kind === "indeterminate")) {
+    if (trace.controlLiveness.some(item => (
+      item.kind === "native-gone"
+      || item.kind === "native-destroyed"
+      || item.kind === "indeterminate-terminal"
+    ))) {
       issues.push(`Trace ${trace.traceId} has terminal control-liveness evidence`);
     }
   }
@@ -875,7 +981,6 @@ export function analyzeEvidence(options: {
     for (const session of manifest.sessions) {
       if (!session.sessionId) issues.push(`Runner did not capture the Goose session ID for ${session.role}`);
       if (session.exitCode !== 0) issues.push(`${session.role} Goose process exited with ${session.exitCode ?? "no status"}`);
-      if (!session.terminalMarkerObserved) issues.push(`${session.role} terminal marker was not observed`);
       const gooseSession = session.sessionId ? gooseSessionsById.get(session.sessionId) : undefined;
       if (session.sessionId && !gooseSession) {
         issues.push(`${session.role} Goose session ${session.sessionId} was not found after the baseline`);
@@ -890,6 +995,15 @@ export function analyzeEvidence(options: {
           issues.push(`${session.role} Goose session has no persisted shell tool call`);
         }
       }
+      const persistedMarkerObserved = finalAssistantHasTerminalMarker(
+        gooseSession,
+        session.terminalMarker,
+      );
+      if (!persistedMarkerObserved) {
+        issues.push(`${session.role} terminal marker was not observed in the final persisted assistant message`);
+      } else if (!session.terminalMarkerObserved) {
+        issues.push(`${session.role} run manifest did not retain its persisted terminal-marker evidence`);
+      }
     }
   }
   const now = options.now ?? new Date();
@@ -901,6 +1015,7 @@ export function analyzeEvidence(options: {
     baselineCapturedAt: options.baseline.capturedAtUtc,
     verdict: issues.length === 0 ? "qualified" : "not-qualified",
     expectedTraceCount,
+    minimumCommonOverlapMs,
     traces: finalizedTraces,
     gooseSessions: options.gooseSessions ?? [],
     processChanges,
@@ -917,6 +1032,7 @@ export function analyzeQualification(options: {
   baseline: QualificationBaseline;
   runManifest?: QualificationRunManifest | null;
   expectedTraceCount?: number;
+  minimumCommonOverlapMs?: number;
   now?: Date;
 }): QualificationAnalysis {
   const logDeltas = Object.fromEntries(
@@ -929,6 +1045,7 @@ export function analyzeQualification(options: {
     gooseSessions: readNewGooseSessions(options.baseline),
     runManifest: options.runManifest,
     expectedTraceCount: options.expectedTraceCount,
+    minimumCommonOverlapMs: options.minimumCommonOverlapMs,
     now: options.now,
   });
 }
@@ -937,7 +1054,7 @@ export function renderQualificationVerdict(analysis: QualificationAnalysis): str
   const lines = [
     analysis.verdict === "qualified" ? "QUALIFICATION PASS" : "QUALIFICATION NOT QUALIFIED",
     `Traces: ${analysis.traces.length}/${analysis.expectedTraceCount}`,
-    `Common overlap: ${analysis.commonOverlap.durationMs}ms`,
+    `Common overlap: ${analysis.commonOverlap.durationMs}ms (required: ${analysis.minimumCommonOverlapMs}ms)`,
     `Goose sessions: ${analysis.gooseSessions.map(session => session.id).join(",") || "none"}`,
     `429/rate-limit events: ${analysis.rateLimits.length}`,
   ];

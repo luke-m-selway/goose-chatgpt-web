@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   analyzeEvidence,
+  finalAssistantHasTerminalMarker,
+  parseDaemonEvidence,
+  qualificationRunTiming,
   readLogDelta,
   readNewGooseSessions,
   renderQualificationVerdict,
@@ -106,6 +109,30 @@ function completeLauncherFixture(): string {
   return `${lines.join("\n")}\n`;
 }
 
+function exactCommonOverlapLauncherFixture(durationMs: number): string {
+  const lines: string[] = [];
+  for (const spec of traceSpecs) {
+    lines.push(launcherRecord(at(0), "browser.turn_started", {
+      traceId: spec.traceId,
+      lifecycle: lifecycle(spec.traceId, spec.surfaceId, spec.rendererPid),
+    }));
+    lines.push(launcherRecord(at(1), "browser.turn_heartbeat", {
+      traceId: spec.traceId,
+      lifecycle: lifecycle(spec.traceId, spec.surfaceId, spec.rendererPid),
+    }));
+    lines.push(launcherRecord(at(durationMs / 1_000), "browser.tab_released", {
+      traceId: spec.traceId,
+      tabId: `tab-${spec.traceId}`,
+      status: "ready",
+    }));
+    lines.push(launcherRecord(at(durationMs / 1_000), "browser.turn_ended", {
+      traceId: spec.traceId,
+      status: "completed",
+    }));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function completeDaemonFixture(): string {
   const lines = traceSpecs.flatMap(spec => [
     `[chatgpt-web] broker trace=${spec.traceId} queued call=call-${spec.traceId} tool=shell waiters=1`,
@@ -129,6 +156,11 @@ const gooseSessions: GooseSessionEvidence[] = traceSpecs.map((spec, index) => ({
   provider: "custom_chatgpt_web__local_1",
   model: index === 0 ? "chatgpt-web/high" : "chatgpt-web/medium",
   toolCalls: [{ name: "shell", createdAt: at(spec.start + 5) }],
+  delegateCalls: [],
+  finalAssistantMessage: {
+    createdAt: at(spec.end),
+    text: `qualification complete\n${index === 0 ? "high-session-ok" : `child-${index === 1 ? "a" : "b"}-ok`}`,
+  },
 }));
 
 const runManifest: QualificationRunManifest = {
@@ -200,6 +232,73 @@ test("qualification analyzer deterministically proves three overlapping ordinary
   expect(renderQualificationVerdict(analysis)).toContain("QUALIFICATION PASS");
 });
 
+test("recoverable indeterminate entry is not terminal but indeterminate-terminal is", () => {
+  const analyzeControlKind = (kind: "indeterminate" | "indeterminate-terminal") => analyzeEvidence({
+    baseline,
+    logDeltas: {
+      launcher: { source: "launcher.jsonl", text: completeLauncherFixture(), rotated: false },
+      daemonStdout: {
+        source: "daemon.stdout.log",
+        text: completeDaemonFixture()
+          + `[chatgpt-web] browser turn trace-a control-liveness=${kind}`
+          + " outstandingMs=76000 sinceHealthyMs=76000 progressing=false"
+          + " domReadFailures=2 nativeStatus=active nativeEvent=created"
+          + " nativeRevision=0 rendererPid=202 surfaceId=surface-a\n",
+        rotated: false,
+      },
+    },
+    currentProcesses: processes,
+    gooseSessions,
+    runManifest,
+  });
+
+  const recoverable = analyzeControlKind("indeterminate");
+  expect(recoverable.verdict).toBe("qualified");
+  expect(recoverable.traces.find(trace => trace.traceId === "trace-a")?.controlLiveness)
+    .toContainEqual(expect.objectContaining({ kind: "indeterminate" }));
+
+  const terminal = analyzeControlKind("indeterminate-terminal");
+  expect(terminal.verdict).toBe("not-qualified");
+  expect(terminal.issues).toContain("Trace trace-a has terminal control-liveness evidence");
+});
+
+test("9999ms of common three-way overlap does not qualify", () => {
+  const analysis = analyzeEvidence({
+    baseline,
+    logDeltas: {
+      launcher: {
+        source: "launcher.jsonl",
+        text: exactCommonOverlapLauncherFixture(9_999),
+        rotated: false,
+      },
+      daemonStdout: { source: "daemon.stdout.log", text: completeDaemonFixture(), rotated: false },
+    },
+    currentProcesses: processes,
+  });
+
+  expect(analysis.commonOverlap.durationMs).toBe(9_999);
+  expect(analysis.verdict).toBe("not-qualified");
+  expect(analysis.issues).toContain("Common overlap was 9999ms, below the required 10000ms");
+});
+
+test("10000ms of common three-way overlap qualifies at the boundary", () => {
+  const analysis = analyzeEvidence({
+    baseline,
+    logDeltas: {
+      launcher: {
+        source: "launcher.jsonl",
+        text: exactCommonOverlapLauncherFixture(10_000),
+        rotated: false,
+      },
+      daemonStdout: { source: "daemon.stdout.log", text: completeDaemonFixture(), rotated: false },
+    },
+    currentProcesses: processes,
+  });
+
+  expect(analysis.commonOverlap.durationMs).toBe(10_000);
+  expect(analysis.verdict).toBe("qualified");
+});
+
 test("qualification analyzer reports missing topology, native death, process restart, and 429 evidence", () => {
   const launcher = completeLauncherFixture()
     .split(/\r?\n/)
@@ -235,6 +334,20 @@ test("qualification analyzer reports missing topology, native death, process res
     expect.stringContaining("daemonPid changed"),
     expect.stringContaining("rate-limit/429"),
   ]));
+});
+
+test("rate-limit evidence recognizes HTTP/status 429 and rejects decimal timings", () => {
+  const real = parseDaemonEvidence([
+    "HTTP 429 Too Many Requests",
+    'provider failed with "status":429',
+  ].join("\n"));
+  expect(real.rateLimits).toHaveLength(2);
+
+  const timings = parseDaemonEvidence([
+    "probe completed in 429.955µs",
+    "parser completed in 8.429µs",
+  ].join("\n"));
+  expect(timings.rateLimits).toEqual([]);
 });
 
 test("log delta reader follows the baseline inode through one rotation", () => {
@@ -286,6 +399,100 @@ test("a log first created after baseline is complete post-boundary evidence, not
   }
 });
 
+function readMarkerSession(messages: Array<{ role: "user" | "assistant"; text: string }>): GooseSessionEvidence {
+  const root = mkdtempSync(join(tmpdir(), "chatgpt-web-marker-session-"));
+  const path = join(root, "sessions.db");
+  const database = new Database(path, { create: true });
+  try {
+    database.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY, name TEXT, session_type TEXT, parent_session_id TEXT,
+        working_dir TEXT, created_at TEXT, updated_at TEXT, provider_name TEXT,
+        model_config_json TEXT
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content_json TEXT,
+        created_timestamp INTEGER
+      );
+    `);
+    database.prepare(`
+      INSERT INTO sessions VALUES (
+        'new', 'qualification-child-a', 'user', NULL, '/repo', ?, ?,
+        'custom_chatgpt_web__local_1', ?
+      )
+    `).run(at(0), at(60), JSON.stringify({ model_name: "chatgpt-web/medium" }));
+    const insertMessage = database.prepare("INSERT INTO messages VALUES (?, 'new', ?, ?, ?)");
+    for (const [index, message] of messages.entries()) {
+      insertMessage.run(
+        index + 1,
+        message.role,
+        JSON.stringify([{ type: "text", text: message.text }]),
+        index + 1,
+      );
+    }
+  } finally {
+    database.close();
+  }
+  try {
+    const sessions = readNewGooseSessions({
+      ...baseline,
+      gooseSessionsDatabase: path,
+      existingGooseSessionIds: [],
+    });
+    if (!sessions[0]) throw new Error("Synthetic Goose session was not read");
+    return sessions[0];
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("terminal marker appearing only in persisted user/prompt content fails", () => {
+  const session = readMarkerSession([
+    { role: "user", text: "End with child-a-ok" },
+    { role: "assistant", text: "I stopped before producing the required marker." },
+  ]);
+  expect(finalAssistantHasTerminalMarker(session, "child-a-ok")).toBe(false);
+});
+
+test("terminal marker in the final persisted assistant message passes", () => {
+  const session = readMarkerSession([
+    { role: "user", text: "End with child-a-ok" },
+    { role: "assistant", text: "Read-only work complete.\nchild-a-ok\n" },
+  ]);
+  expect(finalAssistantHasTerminalMarker(session, "child-a-ok")).toBe(true);
+});
+
+test("wrong marker in the final persisted assistant message fails", () => {
+  const session = readMarkerSession([
+    { role: "user", text: "End with child-a-ok" },
+    { role: "assistant", text: "Read-only work complete.\nchild-b-ok" },
+  ]);
+  expect(finalAssistantHasTerminalMarker(session, "child-a-ok")).toBe(false);
+});
+
+test("analyzer does not trust a manifest marker when persisted final assistant evidence disagrees", () => {
+  const sessions = gooseSessions.map(session => session.id === "session-1"
+    ? {
+        ...session,
+        finalAssistantMessage: { createdAt: at(61), text: "The prompt mentioned child-a-ok only." },
+      }
+    : session);
+  const analysis = analyzeEvidence({
+    baseline,
+    logDeltas: {
+      launcher: { source: "launcher.jsonl", text: completeLauncherFixture(), rotated: false },
+      daemonStdout: { source: "daemon.stdout.log", text: completeDaemonFixture(), rotated: false },
+    },
+    currentProcesses: processes,
+    gooseSessions: sessions,
+    runManifest,
+  });
+  expect(analysis.verdict).toBe("not-qualified");
+  expect(analysis.issues).toContain(
+    "child-a terminal marker was not observed in the final persisted assistant message",
+  );
+});
+
 test("new Goose sessions preserve provider, model, parent, and persisted tool-call evidence", () => {
   const root = mkdtempSync(join(tmpdir(), "chatgpt-web-goose-sessions-"));
   const path = join(root, "sessions.db");
@@ -319,6 +526,25 @@ test("new Goose sessions preserve provider, model, parent, and persisted tool-ca
       JSON.stringify([{ toolCall: { value: { name: "shell" } } }]),
       Math.floor(Date.parse(at(5)) / 1_000),
     );
+    database.prepare("INSERT INTO messages VALUES (?, ?, 'assistant', ?, ?)").run(
+      2,
+      "new",
+      JSON.stringify([{
+        toolCall: {
+          value: {
+            name: "delegate",
+            arguments: { source: "chatgpt-web-concurrency-child-a", async: true },
+          },
+        },
+      }]),
+      Math.floor(Date.parse(at(8)) / 1_000),
+    );
+    database.prepare("INSERT INTO messages VALUES (?, ?, 'assistant', ?, ?)").run(
+      3,
+      "new",
+      JSON.stringify([{ type: "text", text: "complete\nchild-a-ok" }]),
+      Math.floor(Date.parse(at(10)) / 1_000),
+    );
   } finally {
     database.close();
   }
@@ -337,7 +563,19 @@ test("new Goose sessions preserve provider, model, parent, and persisted tool-ca
       updatedAt: at(60),
       provider: "custom_chatgpt_web__local_1",
       model: "chatgpt-web/medium",
-      toolCalls: [{ name: "shell", createdAt: "2026-08-13 18:01:05" }],
+      toolCalls: [
+        { name: "shell", createdAt: "2026-08-13 18:01:05" },
+        { name: "delegate", createdAt: "2026-08-13 18:01:08" },
+      ],
+      delegateCalls: [{
+        source: "chatgpt-web-concurrency-child-a",
+        async: true,
+        createdAt: "2026-08-13 18:01:08",
+      }],
+      finalAssistantMessage: {
+        createdAt: "2026-08-13 18:01:10",
+        text: "complete\nchild-a-ok",
+      },
     }]);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -361,6 +599,13 @@ test("committed child recipes pin identity and inherit tools while async remains
   expect(parent).toContain('delegate(source: "chatgpt-web-concurrency-child-b", async: true)');
 });
 
+test("empty runner timing preserves the baseline fallback instead of evaluating an empty minimum", () => {
+  expect(qualificationRunTiming([], baseline.capturedAtUtc)).toEqual({
+    launchedAt: baseline.capturedAtUtc,
+    launchSpreadMs: 0,
+  });
+});
+
 test("three-surface runner uses ordinary Goose recipes without CDP or runtime lifecycle control", () => {
   const runner = readFileSync(
     join(repositoryRoot, "scripts", "run-chatgpt-web-three-surface-qualification.ts"),
@@ -370,6 +615,8 @@ test("three-surface runner uses ordinary Goose recipes without CDP or runtime li
   expect(runner).toContain('spawn("goose", [');
   expect(runner).toContain('"run",');
   expect(runner).toContain('"--recipe", workload.recipe');
+  expect(runner).toContain("finalAssistantHasTerminalMarker(");
+  expect(runner).not.toContain("includes(item.session.terminalMarker)");
   expect(runner).not.toMatch(/connectOverCDP|playwright|chrome-remote-interface/i);
   expect(runner).not.toMatch(/launchctl\s+(?:kickstart|start|stop)|runtime-lifecycle/i);
 

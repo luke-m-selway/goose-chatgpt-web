@@ -30,7 +30,10 @@ export async function withBrowserControlTimeout<T>(
 }
 
 export interface PostSendBrowserControlLivenessEvent {
-  /** `slow`: the outstanding probe passed the probe timeout. `recovered`: it completed anyway. */
+  /**
+   * `slow`: the outstanding probe passed the probe timeout. `recovered`: it completed anyway.
+   * `indeterminate`: recoverable grace-window entry. `indeterminate-terminal`: grace exhausted.
+   */
   kind:
     | "slow"
     | "recovered"
@@ -38,7 +41,8 @@ export interface PostSendBrowserControlLivenessEvent {
     | "native-responsive"
     | "native-gone"
     | "native-destroyed"
-    | "indeterminate";
+    | "indeterminate"
+    | "indeterminate-terminal";
   /** How long the probe this event describes has been (or was) outstanding. */
   outstandingMs: number;
   /** Time since the last probe that actually completed, i.e. the last proof of control health. */
@@ -197,7 +201,7 @@ export function startPostSendBrowserControlLiveness(
           return;
         }
       }
-      emit("indeterminate", outstandingMs, progressing);
+      emit("indeterminate-terminal", outstandingMs, progressing);
       stopped = true;
       rejectFailure(new ChatGptWebAdapterError(
         "ChatGPT browser control remained in a prolonged indeterminate state after the message was sent;"

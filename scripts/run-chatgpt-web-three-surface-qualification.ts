@@ -3,7 +3,6 @@ import {
   closeSync,
   mkdirSync,
   openSync,
-  readFileSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -12,6 +11,8 @@ import {
   assertOutputOutsideRepository,
   captureQualificationBaseline,
   CHATGPT_WEB_QUALIFICATION_VERSION,
+  finalAssistantHasTerminalMarker,
+  qualificationRunTiming,
   readNewGooseSessions,
   renderQualificationVerdict,
   type QualificationRunManifest,
@@ -196,9 +197,15 @@ try {
     item.session.sessionId = matchingSession?.id ?? null;
     item.session.exitCode ??= item.child.exitCode;
     item.session.completedAt ??= new Date().toISOString();
-    item.session.terminalMarkerObserved = readFileSync(item.session.stdoutPath, "utf8").includes(item.session.terminalMarker);
+    item.session.terminalMarkerObserved = finalAssistantHasTerminalMarker(
+      matchingSession,
+      item.session.terminalMarker,
+    );
   }
-  const launched = running.map(item => Date.parse(item.session.launchedAt));
+  const timing = qualificationRunTiming(
+    running.map(item => item.session),
+    baseline.capturedAtUtc,
+  );
   const manifest: QualificationRunManifest = {
     version: CHATGPT_WEB_QUALIFICATION_VERSION,
     kind: "chatgpt-web-three-surface-run",
@@ -206,9 +213,9 @@ try {
     repositoryRoot,
     runtimeHome,
     baselinePath,
-    launchedAt: new Date(Math.min(...launched)).toISOString(),
+    launchedAt: timing.launchedAt,
     completedAt: new Date().toISOString(),
-    launchSpreadMs: Math.max(...launched) - Math.min(...launched),
+    launchSpreadMs: timing.launchSpreadMs,
     repositoryStatusUnchanged: beforeStatus === gitStatusSnapshot(),
     sessions: running.map(item => item.session),
   };
