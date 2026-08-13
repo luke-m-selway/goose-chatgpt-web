@@ -1,10 +1,10 @@
 # ChatGPT-Web subagents under Electron
 
-Status: **active qualification; not yet proven**.
+Status: **active qualification; recursive child execution and parent/child overlap proven; parent + two reliable operating envelope not yet qualified**.
 
-This document is the durable qualification record for ordinary Goose sessions whose parent provider is ChatGPT-Web and whose Goose-native child agent also uses ChatGPT-Web under the current Electron BrowserHost architecture.
+This document is the durable qualification record for ordinary Goose sessions whose parent provider is ChatGPT-Web and whose Goose-native child agent also uses ChatGPT-Web under the Electron BrowserHost.
 
-Do not treat structural concurrency support as a live qualification. Until the proofs below pass, the existing repository rule remains in force: avoid parallel ChatGPT-Web child fan-out.
+Do not infer a larger supported envelope from the BrowserHost's five-tab safety ceiling. The intended normal target remains one parent + two ChatGPT-Web children, and that target is still under qualification.
 
 ## Objective
 
@@ -21,17 +21,13 @@ ordinary Goose parent
 Target operating policy if proven:
 
 - normal maximum: one ChatGPT-Web parent + two ChatGPT-Web children;
-- rare maximum worth qualifying: parent + three ChatGPT-Web children;
+- rare maximum worth qualifying later: parent + three ChatGPT-Web children;
 - do not optimize for BrowserHost's five-tab safety ceiling;
 - continue to prefer cheaper/free workers when another strong ChatGPT-Web child is unnecessary.
-
-This is provider/runtime qualification. Day Shift may later decide when to use the capability, but provider-specific concurrency policy does not belong in Day Shift until it is live-proven here.
 
 ## Ownership boundary
 
 No new orchestration layer is intended.
-
-Correct ownership remains:
 
 ```text
 Goose creates and manages the subagent
@@ -47,236 +43,314 @@ Electron continues to own BrowserHost only. Do not add Electron-specific delegat
 
 ### Proven
 
-- Ordinary Goose can use ChatGPT-Web as its main provider through the current Electron runtime.
-- Goose-native delegation from a ChatGPT-Web parent to explicit non-ChatGPT providers was proven under the earlier managed-Chrome transport.
-- The managed-Chrome implementation also showed that ChatGPT's own connector safety gate can intermittently block otherwise valid Goose Native tool calls; a connector-side safety rejection therefore must not automatically be classified as a browser/runtime defect.
+- Ordinary Goose can use ChatGPT-Web as its main provider through the Electron runtime.
+- Goose-native delegation from a ChatGPT-Web parent to explicit non-ChatGPT providers was already proven under managed Chrome and again under Electron with an NVIDIA child.
+- A natural ordinary-Goose ChatGPT-Web parent successfully delegated to a ChatGPT-Web child under Electron.
+- Parent and ChatGPT-Web child used distinct Electron surfaces and had real overlapping active intervals.
+- Goose's native `delegate(..., async: true)` path is proven to return a background task/session ID, and `load(source: "<session_id>")` is proven to retrieve the result later.
+- Independent Electron browser turns can run concurrently on separate task-bound surfaces.
+- The Electron BrowserHost can create three distinct simultaneously active ChatGPT-Web turns. A controlled run achieved genuine parent + Child A + Child B overlap for about 24 seconds before the then-current liveness detector terminated two healthy turns.
+- A later two-turn run on the hardened liveness candidate observed slow CDP probes on both parent and child followed by clean recovery, with BrowserHost heartbeats continuing and no native renderer-gone/destroyed/unresponsive event.
+- A same-Goose-session follow-up after that delegation/network-error turn produced a coherent diagnosis of the preceding failure, adding post-error continuation evidence.
 
-### Structurally supported but not yet live-qualified for recursive children
+### Not yet qualified
 
-The current BrowserHost already supports multiple active browser turns:
+- Reliable parent + two ChatGPT-Web children through natural Goose-native async delegation.
+- Concurrent Goose Native tool calls from both ChatGPT-Web children while the parent is also active.
+- Parent + three children as rare capacity.
+- The current Electron-native liveness hardening candidate under a successful three-surface reproduction.
 
-- `turnTabs` tracks multiple active turns;
-- each turn receives its own `WebContentsView`;
-- each turn receives distinct trace and surface identity;
-- helper/heartbeat state is turn-scoped;
-- terminal cleanup releases only the completed turn while leaving other running tabs untouched;
-- the hard BrowserHost safety ceiling is five simultaneous ChatGPT browser turns.
+## Important live proofs
 
-These properties justify testing concurrency but do not prove parent → child recursion.
+### Natural recursive child — PASS
 
-### Failed before child launch
+An ordinary Goose ChatGPT-Web parent used native Summon/delegate to request one `chatgpt-web/medium` child returning `child-one-ok`.
 
-The first Electron child attempt asked a ChatGPT-Web parent to create an ad-hoc delegate with explicit:
+Observed:
 
-- provider `custom_chatgpt_web__local_1`;
-- model `chatgpt-web/medium`.
+- parent Goose session `20260813_27`, trace `0445fc415bce`, surface `ymYeVhIXk68xYu0dRAY8VCKThmCsWXd3`;
+- first child session `20260813_28`, trace `590af3a86caf`, surface `o2chJKvncPOHwxHOpAjgk0GmUcTWlAFm`;
+- second duplicate child session `20260813_29`, trace `2291f4ef8eb9`, surface `zh-X2bYZH8_f4PBo_IpRlFB0yhH4WZJz`;
+- both children returned `child-one-ok`;
+- parent produced the requested final result once.
 
-The Goose Native tool call was rejected with ChatGPT/OpenAI's safety-block response before the delegated child started.
+The duplicate second child was a separate model-issued tool call, not transport replay: distinct call IDs, sessions, traces and surfaces; the first child completed before the second began.
 
-Therefore:
+Parent/child overlap was real:
 
-- child launched: **FAIL**;
-- parent survived: **PASS**;
-- Electron child concurrency: **NOT TESTED**.
+- parent alive about 16:51:20–16:55:57;
+- parent + child 1 overlap about 16:52:17–16:54:26;
+- parent + child 2 overlap about 16:54:30–16:55:46.
 
-Do not record that attempt as an Electron/browser failure.
+Conclusion: recursive ChatGPT-Web child execution and distinct parent/child surfaces are **proven**.
 
-## Goose-native mechanism to qualify
+### Async delegation semantics — PASS
 
-Use Goose's built-in Summon named-source delegation rather than inventing a custom delegation path.
+A later actor run proved invocation-level async behavior:
 
-Current Goose supports named recipes/agents discovered by Summon. A named recipe can carry child execution policy in its `settings`, including:
+- Child A accidentally ran synchronously;
+- Child B used `async: true` and returned immediately with a background session ID;
+- the parent later retrieved Child B through `load(source: "<session_id>")`;
+- parent overlapped independently with each child, but the two children did not overlap.
 
-- `goose_provider`;
-- `goose_model`;
-- `max_turns`;
-- recipe extension configuration.
+This established the exact Goose-native background-task contract without proving child-child parallelism.
 
-The parent can then generate the minimal call shape:
+### Three-way topology — REACHED, reliability failed under old liveness detector
+
+A stricter run launched two async ChatGPT-Web children and required parent work before any `load()`.
+
+Observed:
+
+- parent session `20260813_33`, trace `eec6ad3be939`, surface `Q0j2bJw6AH_esbl8gc6iqN2Qe5aAQMxW`;
+- Child A session `20260813_34`, trace `2681a1f45702`, surface `INa5oo_KrbXCEE3NhszkAgXQIv2QboCU`;
+- Child B session `20260813_35`, trace `fbf3a387f92c`, surface `2eNnH_IQQU6t5_yBQ1pILFqFH8ue5uWh`;
+- both delegate calls had `async: true`;
+- no `load()` occurred before parent work;
+- parent executed its own read-only shell work while both children were active;
+- genuine three-way common interval was about 17:31:59.983–17:32:24.044 (~24 seconds).
+
+Parent and Child A then terminated with `chatgpt_browser_control_unresponsive`; Child B simultaneously experienced a browser diagnostic capture timeout but recovered, performed three successful shell calls, and completed `child-b-ok`.
+
+Subsequent forensic review established that Parent and Child A were not dead at their terminal timestamps: their own failure diagnostics still executed substantial DOM evaluation, and the parent captured a screenshot; BrowserHost heartbeats continued and no renderer-gone event occurred.
+
+Conclusion:
+
+- three distinct simultaneous ChatGPT-Web turns: **PROVEN**;
+- reliable parent + two operating envelope: **NOT QUALIFIED**;
+- old per-turn control-liveness terminal: **FALSE TERMINAL** for Parent and Child A;
+- concurrent child tool use across both children: **NOT PROVEN** because Child A failed before its first shell call.
+
+### Liveness hardening candidate — static/unit validation PASS, three-way live proof pending
+
+The failure above drove a narrow liveness redesign. The candidate implementation is intentionally tracked separately from this documentation-only PR and must not be treated as qualified until its live proof passes.
+
+The intended state model is:
 
 ```text
-delegate(source: "<named-worker>")
+Electron-native owned-surface lifecycle
+  active
+  unresponsive       → degraded, not terminal
+  responsive         → recovery
+  gone               → deterministic terminal
+  destroyed          → deterministic terminal
+
+CDP/DOM evidence
+  completed probe    → positive health
+  DOM progress       → positive health
+  slow probe         → congestion evidence, not renderer-death evidence
+
+last resort
+  prolonged indeterminate control state → bounded fail-closed terminal
 ```
 
-This is preferable for the next proof because provider/model selection stays in deterministic Goose configuration instead of appearing as low-level execution configuration inside the model-generated tool payload.
+The candidate preserves one control probe in flight at a time and exposes per-turn native lifecycle evidence through the existing BrowserHost turn heartbeat path. Renderer PID is recorded for correlation only, never as sole proof of health.
 
-Provider/model inheritance remains a valid Goose feature, but the first qualification should explicitly select ChatGPT-Web in the named recipe so the test cannot accidentally inherit another provider.
+Static/unit validation reported before the next live run:
 
-## Next proof — named recipe, one child
+- `bunx tsc --noEmit` clean;
+- `bun test tests/*.test.ts` 392 passed, 0 failed;
+- `bun run --cwd launcher test` 171 passed, 0 failed;
+- `git diff --check` clean.
 
-Before changing transport code, create a disposable recipe outside tracked project files, for example under a disposable working directory's `.goose/recipes/`:
+Do not silently upgrade this implementation candidate to proven until the three-surface live proof runs on the exact committed candidate revision.
 
-```yaml
-version: 1.0.0
-title: ChatGPT-Web child qualification
-description: Disposable inference-only ChatGPT-Web child
-instructions: >-
-  Return exactly child-one-ok and nothing else.
-extensions: []
-settings:
-  goose_provider: custom_chatgpt_web__local_1
-  goose_model: chatgpt-web/medium
-  max_turns: 1
+### Latest attempted parent + two proof — INVALID ASYNC SEQUENCE, useful two-way liveness evidence
+
+The next actor attempted the parent + two async proof but the first model-generated delegate invocation omitted the actual `async: true` field. Goose's native delegate schema defaults `async` to false. Prose inside the child `instructions` saying “run asynchronously” cannot change the parent tool call's execution mode.
+
+Persisted delegate arguments contained `provider`, `model`, and `instructions`, but no `async` field.
+
+Only parent + Child A formed:
+
+- parent trace `5b705eba9831`, surface `PvL4JBm0rhUmh5C5HuVhDRWz3ziTlPYo`, renderer PID 82947;
+- Child A trace `9e97210f4e30`, surface `bMVnXj_KU0QgNd2lGaYszPIDFbyoQALI`, renderer PID 82977;
+- parent/child overlap lasted about 5 minutes;
+- Child B was never created.
+
+The synchronous delegate path later returned `Network error: Stream decode error: error decoding response body`. The parent correctly stopped the qualification before launching Child B.
+
+Useful liveness evidence from this otherwise invalid run:
+
+- parent slow control probe ~5.2s → recovered ~6.6s;
+- Child A slow probe ~5.0s → recovered ~5.3s;
+- parent had 3 DOM-read failures, Child A 1;
+- no native unresponsive/responsive/gone/destroyed event;
+- BrowserHost heartbeats remained healthy;
+- daemon and BrowserHost PIDs remained stable;
+- no three-way topology existed, so this is not a three-way pass or failure.
+
+The different renderer PIDs in this run also mean renderer-process sharing must not be assumed as a universal explanation for earlier contention. The older three-way run lacked PID instrumentation, so whether those three surfaces shared a renderer remains unresolved.
+
+### Post-error continuation — PASS
+
+After the invalid delegation/network-error turn, a follow-up user message in the same ordinary Goose conversation asked why the delegation had not run asynchronously.
+
+The next ChatGPT-Web turn correctly identified that the actual delegate tool call omitted `async: true`, explained that async defaults false, distinguished child-instruction prose from invocation-level execution mode, and separately identified the stream-decode error as unrelated to the missing async flag.
+
+Conclusion: this provides additional evidence that a delegation/network-error episode does not inherently poison later same-Goose-session continuation.
+
+## Goose-native delegation contract
+
+Use Goose's built-in Summon/delegate path. Do not invent a custom scheduler.
+
+Named recipes are useful because they can make child identity and workload deterministic, including provider/model/max-turn/tool configuration. However, current qualification evidence shows that **async is an invocation-level delegate argument**.
+
+Therefore a recipe can reduce the parent call to approximately:
+
+```text
+delegate(source: "chatgpt-web-concurrency-child-a", async: true)
+delegate(source: "chatgpt-web-concurrency-child-b", async: true)
 ```
 
-The parent should be asked only to invoke the named worker and report the result. The intended Goose-native tool call is source-only; do not add provider, model, working directory, arbitrary context, response schema, or tool-heavy instructions to this first proof.
+Do not rely on prose inside child instructions to request background execution. If `async: true` is absent, the call is synchronous.
 
-No repository code change is required before this test.
+## Qualification strategy from here
 
-If the first source-only attempt receives the same connector safety rejection before Goose starts a child, one identical retry in a fresh disposable parent is permitted because historical managed-Chrome evidence established intermittent connector safety classification. Do not alter wording or weaken/bypass safety controls.
+Keep two separate proofs so browser/runtime qualification does not depend on model compliance with one structured argument.
 
-If both identical source-only attempts are safety-blocked, the next diagnostic should use a known harmless named non-ChatGPT worker as a control. That distinguishes a general Summon/delegate safety gate from a restriction correlated specifically with the ChatGPT-Web child target.
+### Proof 1 — deterministic three-surface BrowserHost/liveness proof
 
-## Failure classification
+Use committed first-party qualification infrastructure to launch three ordinary Goose ChatGPT-Web sessions concurrently:
 
-Keep these failure classes separate.
+- one `chatgpt-web/high`;
+- two `chatgpt-web/medium`;
+- fixed bounded read-only workloads;
+- Goose Native shell use;
+- committed log/evidence analyzer.
 
-### Connector safety failure
-
-Evidence:
-
-- ChatGPT/OpenAI safety-block text;
-- no delegated Goose child execution;
-- no child provider trace;
-- no second BrowserHost surface.
-
-Interpretation: the proof did not reach Electron concurrency.
-
-### Recipe/discovery failure
-
-Evidence:
-
-- named source not found;
-- recipe parse/configuration error;
-- no child provider turn.
-
-Interpretation: fix the disposable Goose test setup, not the browser runtime.
-
-### Goose provider-resolution / recursive-provider failure
-
-Evidence:
-
-- delegate accepted and recipe resolved;
-- child creation fails while resolving/creating `custom_chatgpt_web__local_1` or `chatgpt-web/medium`;
-- no child BrowserHost trace.
-
-Interpretation: investigate native Goose/provider registration before Electron.
-
-### Electron concurrency failure
-
-Evidence:
-
-- delegated child provider turn starts;
-- a child ChatGPT-Web trace is issued;
-- BrowserHost lease/surface/CDP/heartbeat ownership then fails.
-
-Interpretation: this is the first failure class that can justify transport code changes.
-
-### Account rate limit
-
-Evidence:
-
-- structured HTTP 429 / `rate_limit_exceeded` from the existing ChatGPT rate-limit detection.
-
-Interpretation: account/request-rate behavior, not automatically a BrowserHost concurrency defect. Do not add arbitrary sleeps unless repeated live evidence shows pacing is the limiting factor.
-
-### Isolation failure
-
-Evidence can include:
-
-- wrong result routed to the wrong Goose session;
-- trace/surface ownership crossing;
-- heartbeat owner mismatch;
-- child completion terminating/corrupting the parent;
-- parent completion corrupting a still-running child.
-
-Interpretation: stop fan-out qualification and repair isolation before proceeding.
-
-## Qualification ladder
-
-Keep each proof disposable, bounded, and short.
-
-### Proof A — independent Electron concurrency control
-
-Optional. Run two unrelated disposable ordinary Goose ChatGPT-Web sessions concurrently only if it becomes useful to isolate BrowserHost concurrency independently of delegation.
-
-### Proof B — one named ChatGPT-Web child
-
-Required next proof.
+This proves the BrowserHost/liveness operating envelope without relying on a parent model to remember `async: true`.
 
 Pass requires:
 
-- source-only Goose-native delegate accepted;
-- child Goose task actually created;
-- child uses `custom_chatgpt_web__local_1` / `chatgpt-web/medium`;
-- distinct child Electron trace/surface appears;
-- child returns `child-one-ok`;
-- parent remains alive and receives the child result.
+- three distinct traces/surfaces;
+- a real common overlap interval;
+- successful tool work during the overlap;
+- no false terminal;
+- no ownership/capability crossover;
+- no runtime restart;
+- clean terminal release;
+- native lifecycle and control-liveness evidence retained.
 
-### Proof C — real overlap
+### Proof 2 — natural recursive parent + two async children
 
-After Proof B, demonstrate parent and child are concurrently active rather than merely sequential. Prefer trace/browser timestamps and live surface state over artificial sleeps.
+Separately qualify the real target topology:
 
-Pass requires distinct overlapping active intervals and clean independent release/heartbeat behavior.
+```text
+ChatGPT-Web parent
+  → delegate(source: child-a, async: true)
+  → delegate(source: child-b, async: true)
+  → parent work before load()
+  → load child A
+  → load child B
+```
 
-### Proof D — two parallel children
+Use committed named recipes so provider/model/task/tool requirements are stable and the parent only has to generate the small invocation-level async calls.
 
-Main target capability.
+If either delegate omits `async: true`, classify the run as **INVALID ASYNC SEQUENCE**, not as a BrowserHost failure.
 
-Parent launches two bounded ChatGPT-Web children that return distinct fixed values such as `child-a-ok` and `child-b-ok`.
+## Failure classification
 
-Pass requires genuine overlap of three ChatGPT-Web turns:
+Keep these classes separate.
 
-- parent;
-- child A;
-- child B.
+### Connector safety failure
 
-Both results must return to the correct parent without trace/surface crossover.
+Safety-block response before Goose starts a delegated child. This does not test Electron concurrency.
 
-### Proof E — one child with harmless Goose tool authority
+### Async invocation omission
 
-After inference-only recursion works, run one child that performs one read-only Goose-native action against a harmless repository file.
+The parent-generated delegate tool call omits `async: true`, so Goose uses the synchronous default. This invalidates an async-concurrency proof before BrowserHost conclusions can be drawn.
 
-Pass requires separate, valid turn-scoped Goose Native authority for parent and child, with no `turn_token`/capability leakage and the child tool call executing against the child Goose turn.
+### Recipe/discovery failure
 
-### Proof F — optional third child
+Named source not found or recipe parse/configuration error. Fix the test setup, not the browser runtime.
 
-Only after all previous proofs are clean. Qualify parent + three ChatGPT-Web children as rare capacity, not the default operating mode.
+### Stream/transport decode failure
 
-Do not test five simultaneous children without new evidence giving a concrete reason.
+Examples include `Network error: Stream decode error: error decoding response body`. Record separately from async compliance and browser liveness; do not infer one caused the other without evidence.
 
-## Evidence to retain for successful proofs
+### Provider-resolution failure
 
-For each proof, record only the evidence needed to support the exact claim:
+Delegate accepted and recipe resolved, but child provider/model creation fails before a child BrowserHost trace appears.
 
-- parent/child Goose session or task identity where relevant;
-- parent and child provider/model selection;
-- distinct browser trace IDs;
-- distinct BrowserHost tab/surface IDs;
-- creation/active/completion timestamps sufficient to establish overlap where required;
-- child result returned to the parent;
-- relevant release/heartbeat evidence;
-- any observed structured 429;
-- tool-authority evidence for Proof E.
+### Browser/liveness failure
 
-Do not claim a higher concurrency level than was live-proven.
+A child provider trace/surface starts and ownership/lifecycle/control subsequently fails. Distinguish deterministic native `gone`/`destroyed` evidence from prolonged indeterminate control state and from recoverable slow probes.
+
+### Account rate limit
+
+Structured 429 / `rate_limit_exceeded`. Do not treat automatically as BrowserHost concurrency failure.
+
+### Isolation failure
+
+Wrong result routing, surface/trace ownership crossing, heartbeat owner mismatch, or one turn's cleanup corrupting a sibling.
+
+## Evidence to retain
+
+For every qualification run record:
+
+- exact committed revision under test;
+- helper bundle identity and fresh-helper preflight;
+- parent/child Goose session IDs where relevant;
+- provider/model selection;
+- delegate arguments including whether `async: true` was actually present;
+- trace IDs and BrowserHost surface IDs;
+- renderer PIDs where exposed;
+- native lifecycle transitions;
+- slow/recovered/indeterminate control-liveness events;
+- DOM-read failures;
+- heartbeat/lease evidence;
+- tool-call evidence;
+- creation/completion/release timestamps and overlap windows;
+- structured 429 evidence;
+- runtime process restart evidence.
+
+Prefer committed first-party observation tooling over ad-hoc monitor-agent shell reconstruction.
 
 ## Promotion rule
 
-The capability remains **unqualified** until Proof B passes.
+Recursive parent → ChatGPT-Web child is already proven. Do not regress that claim back to unproven.
 
-If Proof B passes but Proof D does not, document only the smaller reliable envelope. If parent + two children is reliable but parent + three is not, the supported operating ceiling is parent + two.
+The normal parent + two operating envelope remains **unqualified** until both the deterministic three-surface liveness proof and the natural parent + two async integration proof are clean on the current liveness implementation.
 
-A smaller reliable envelope is preferable to using the BrowserHost's larger safety ceiling.
+A smaller reliable envelope is preferable to treating the five-tab safety ceiling as an operating target.
 
 ## Qualification log
 
 ### 2026-08-12 — initial review
 
-- Current repository checkpoint: `40c29bfc59f6e51f1742784824110cd53e907de7`.
-- Current code remains structurally multi-turn under Electron.
-- First ad-hoc recursive child attempt was blocked by ChatGPT/OpenAI safety classification before child launch.
-- Managed-Chrome history confirms both successful Goose-native delegation and intermittent connector-side safety blocking.
-- Current Goose Summon supports the cleaner named-source recipe path.
-- Decision: make **no transport code change before the named-recipe one-child proof**.
-- Next proof: Proof B.
+- BrowserHost structurally multi-turn.
+- First synthetic/ad-hoc recursive attempt safety-blocked before child launch.
+- Decision at that time: no transport change based on a pre-Electron safety block.
+
+### 2026-08-13 — natural recursion and overlap
+
+- Natural parent → ChatGPT-Web child succeeded.
+- Parent/child distinct surfaces and overlapping active intervals proven.
+- Parent model duplicated the child sequentially; classified as model tool-calling behavior, not replay.
+
+### 2026-08-13 — async semantics
+
+- Native async delegate returned a background session ID.
+- Later `load(source: session_id)` retrieved the child result.
+- Child-child overlap not achieved in that run because the first child call was synchronous.
+
+### 2026-08-13 — three-way overlap and false terminal
+
+- Parent + two async children genuinely overlapped for ~24 seconds.
+- Parent performed own shell work during the common interval.
+- Parent and Child A were falsely terminated by the old browser-control liveness detector while Child B experienced similar control slowness, recovered and completed.
+- Forensics showed Parent/Child A renderers still executed DOM diagnostics at their terminal timestamps.
+
+### 2026-08-13 — native-lifecycle hardening candidate
+
+- Liveness design changed toward Electron-native `gone`/`destroyed` authority, recoverable `unresponsive`/`responsive`, one control probe in flight, and a bounded prolonged-indeterminate fallback.
+- Static/unit suites passed; live three-surface qualification still pending.
+
+### 2026-08-13 — invalid async attempt, useful recovery evidence
+
+- Parent omitted invocation-level `async: true`; only parent + Child A formed.
+- Slow CDP probes on both turns recovered cleanly under the candidate liveness design.
+- Renderer PIDs differed (82947 / 82977) in this run.
+- Synchronous child path later hit a stream decode error; parent stopped the proof correctly.
+- A later same-session user follow-up produced a coherent diagnosis of the missing async field and separate network error.
+- Next: committed deterministic qualification runner + committed evidence analyzer, then natural parent + two proof using named child recipes and explicit `async: true`.
