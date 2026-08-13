@@ -1,46 +1,60 @@
 # goose-chatgpt-web roadmap
 
-This file contains **current and next work only**. The older chronological engineering diary remains in Git history at `dd44b74` and is historical, not a source of current lifecycle or priority instructions.
+This file contains **current and next work only**. Older chronological engineering diary material remains historical, not a source of current lifecycle or priority instructions.
 
-## Current runtime checkpoint — qualified
+## Current runtime checkpoint — qualified base
 
-Status: **current/proven**, with one named validation gap.
+Status: **current/proven**, with separately named validation gaps.
 
 - Electron BrowserHost ownership is BrowserHost-only.
 - Responses daemon and Secure MCP Tunnel are independently supervised.
 - Canonical lifecycle is proven: `tunnel ready → BrowserHost genuinely ready → daemon ready`, with reverse shutdown.
 - BrowserHost readiness is proven through the descriptor-provided Node/Electron Node browser-helper path; Bun-direct Playwright/CDP is not authoritative.
-- Ordinary Goose first turn and separate persisted-session `--resume` continuation are proven.
-- Ordered macOS autostart is implemented with one login-visible coordinator that invokes canonical `lifecycle start`; daemon/tunnel launchd definitions live under the runtime home and remain launchd-supervised.
-- The earlier failed in-task lifecycle/autostart proof was self-interference from the active BrowserHost-backed turn, not a general Electron regression.
+- Ordinary Goose first turn and persisted-session continuation are proven.
+- Ordered macOS autostart is implemented and live-checked short of the actual reboot/login boundary.
 
-Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item.
+Remaining lifecycle validation: **actual Mac reboot/login reconstruction is NOT RUN**.
 
-## Active focused qualification — ChatGPT-Web subagents under Electron
+## Active focused qualification — ChatGPT-Web subagents and three-surface liveness
 
-Status: **active; recursive ChatGPT-Web children are not yet proven**.
+Status: **recursive child execution proven; parent + two reliable envelope still active qualification**.
 
-The current Electron BrowserHost is structurally multi-turn, but parent → Goose-native delegate → ChatGPT-Web child has not yet been live-qualified under Electron.
+What is already proven:
 
-The first ad-hoc child attempt was blocked by ChatGPT/OpenAI's connector safety classification before the child started, so it did **not** test Electron concurrency. Historical managed-Chrome evidence already proves Goose-native delegation from ChatGPT-Web parents and also records intermittent connector-side safety blocking.
+1. ordinary ChatGPT-Web parent → Goose-native delegate → ChatGPT-Web child under Electron;
+2. distinct parent/child BrowserHost surfaces;
+3. genuine parent/child overlap;
+4. native `delegate(..., async: true)` background-session semantics and later `load()` retrieval;
+5. three distinct simultaneous ChatGPT-Web turns can exist: a controlled parent + two-child run achieved about 24 seconds of common overlap.
 
-Next action: run the smallest named-source Summon proof using a disposable Goose recipe that selects `custom_chatgpt_web__local_1` / `chatgpt-web/medium`, with the parent generating only `delegate(source: "<name>")`. Make no transport code change before that test.
+The three-way run exposed a real liveness defect in the then-current detector: Parent and Child A were terminated as `chatgpt_browser_control_unresponsive` even though their failure diagnostics still executed DOM work, BrowserHost heartbeats continued, and Child B experienced similar control slowness then recovered and completed. This was a false terminal, not proof that three BrowserHost surfaces cannot coexist.
 
-Qualification target if the ladder stays clean:
+A narrow Electron-native liveness hardening candidate now treats native `gone`/`destroyed` as deterministic terminal evidence, `unresponsive` as degraded/recoverable, `responsive` as recovery, completed CDP/DOM activity as positive health, and a prolonged indeterminate state as the bounded last resort. Static/unit validation passed; the successful three-surface live proof remains pending.
 
-1. parent + one ChatGPT-Web child;
-2. genuine parent/child overlap;
-3. parent + two parallel ChatGPT-Web children — intended normal maximum;
-4. one child with harmless read-only Goose Native tool authority;
-5. optionally parent + three children as rare capacity.
+The latest natural parent + two attempt did **not** test the target topology because the first model-generated delegate call omitted invocation-level `async: true`, which defaults false. Only parent + Child A existed. Useful evidence from that invalid run:
+
+- both parent and child experienced >5 s slow control probes and then recovered;
+- BrowserHost heartbeats remained healthy;
+- no native gone/destroyed/unresponsive event occurred;
+- parent and child had different renderer PIDs in that run;
+- the synchronous child path later hit a separate stream-decode network error;
+- a follow-up turn in the same Goose conversation remained coherent and correctly diagnosed the missing async field.
+
+Next actions:
+
+1. commit/version the liveness implementation and reusable qualification infrastructure;
+2. run a deterministic three-surface BrowserHost/liveness proof that does not depend on a parent model remembering `async: true`;
+3. separately run the natural recursive parent + two integration proof using named child recipes plus explicit invocation-level `async: true` on both delegate calls;
+4. qualify concurrent Goose Native tool use across both children;
+5. only after parent + two is clean, optionally qualify parent + three as rare capacity.
 
 Do not optimize for the BrowserHost five-tab safety ceiling and do not claim a higher concurrency level than was live-proven.
 
-See [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) for the evidence matrix, failure classification, proof ladder, and qualification log.
+See [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) for exact traces/surfaces, failure classification, async semantics, liveness evidence, and promotion rules.
 
 ## Active product milestone — Goose Control first proof
 
-Status: **active; not implemented yet**.
+Status: **active; separate from BrowserHost/subagent qualification**.
 
 Build the smallest end-to-end Planner-to-Goose bridge described in [`goose-control-plan.md`](goose-control-plan.md):
 
@@ -85,7 +99,7 @@ reboot/login
   → ordered autostart reconstructs runtime
   → canonical lifecycle healthy
   → ordinary Goose first turn
-  → separate dependent --resume
+  → separate dependent continuation
 ```
 
 Do not perform this from a Goose turn that depends on the runtime being restarted.
