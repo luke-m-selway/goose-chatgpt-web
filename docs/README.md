@@ -18,22 +18,34 @@ This directory is the authoritative handoff for the current Goose-first runtime 
 - [`security-model.md`](security-model.md) — current trust/capability boundaries.
 - [`../AGENTS.md`](../AGENTS.md) — mandatory runtime/safety rules for agents.
 
-The qualified runtime base is the Electron checkpoint `c624274` plus current-main autostart commit `dd44b74`.
-
 ## Active qualification workstream
 
-- [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) — qualification record for Goose-native ChatGPT-Web children under the Electron BrowserHost. The capability is **not yet proven**; the next test is one named-recipe/source-only ChatGPT-Web child. Until the documented proofs pass, do not claim recursive BrowserHost concurrency or parallel ChatGPT-Web child fan-out as qualified.
+- [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) — durable qualification record for Goose-native ChatGPT-Web children and Electron BrowserHost concurrency.
+
+Current evidence boundary:
+
+- recursive ChatGPT-Web parent → Goose-native → ChatGPT-Web child execution: **PROVEN**;
+- distinct parent/child Electron surfaces and real overlap: **PROVEN**;
+- Goose native async background-task + later `load()` semantics: **PROVEN**;
+- three distinct simultaneous ChatGPT-Web turns: **PROVEN structurally/live for ~24 s**;
+- reliable parent + two operating envelope: **NOT YET QUALIFIED**;
+- current Electron-native liveness hardening candidate: static/unit validation passed, successful three-surface live qualification pending;
+- concurrent tool use across both children: **NOT YET PROVEN**.
+
+The latest attempted natural parent + two proof was invalid because the model-generated first delegate call omitted invocation-level `async: true`; it still supplied useful two-turn slow→recovered liveness evidence and a later same-session follow-up remained coherent after the delegation/network-error episode.
+
+Do not regress proven recursion back to “unproven,” and do not promote the parent + two envelope until the documented deterministic liveness and natural async integration proofs both pass.
 
 ## Active product milestone
 
 - [`goose-control-plan.md`](goose-control-plan.md) — Goose Control remains the next product capability. Its backend is settled on authenticated loopback Goose ACP; its first Planner-facing proof is a private GPT Action calling a narrow authenticated HTTPS REST/OpenAPI facade.
-- [`roadmap.md`](roadmap.md) — current and next work only, including the focused ChatGPT-Web subagent qualification.
+- [`roadmap.md`](roadmap.md) — current and next work only, including the focused ChatGPT-Web concurrency/liveness qualification.
 
 ## Provisional / not yet proven
 
 The actual Mac **reboot/login → automatic reconstruction → ordinary Goose first turn → separate dependent `--resume`** proof has not been run. Ordered autostart is implemented and live-checked without that reboot boundary.
 
-ChatGPT-Web parent → Goose-native → ChatGPT-Web child execution under Electron is also not yet live-proven. See [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) for the exact evidence boundary and qualification ladder.
+The normal ChatGPT-Web parent + two ChatGPT-Web children operating envelope also remains provisional. See [`chatgpt-web-subagents.md`](chatgpt-web-subagents.md) for the exact live evidence, liveness false-terminal incident, current hardening design, async-invocation constraint, and next proof sequence.
 
 No document may silently upgrade either item to proven status.
 
@@ -46,7 +58,7 @@ For ChatGPT-Web subagents, parent + three children is optional rare-capacity qua
 ## Historical/design inputs
 
 - Draft PR #25 refined Goose Control around native ACP and remains useful design evidence, but its write-capable custom-MCP-first Planner surface and async-first MVP are superseded by the current `goose-control-plan.md`.
-- Draft PR #26 proposed a useful documentation split and lifecycle clarification, but its pre-autostart provisional runtime status is superseded by current `main` plus this reconciliation.
-- The previous long chronological roadmap remains available in Git history at `dd44b74`; use it for archaeology only, not for current priorities or lifecycle instructions.
+- Draft PR #26 proposed a useful documentation split and lifecycle clarification, but its pre-autostart provisional runtime status is superseded by later runtime work.
+- Older chronological roadmap material remains available in Git history for archaeology only, not for current priorities or lifecycle instructions.
 
 When historical material conflicts with current code/proofs and the current documents above, use the current documents.
