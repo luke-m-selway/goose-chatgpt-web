@@ -207,6 +207,15 @@ test("broker incompletion, retry replacement, and transient UI state remain quer
   });
 });
 
+test("failed broker results settle rather than remain unresolved", () => {
+  const summary = summarizeFlightEvents([
+    event("2026-08-14T10:00:00.000Z", "broker", "broker-queued", { callId: "call-failed", toolName: "shell" }),
+    event("2026-08-14T10:00:01.000Z", "broker", "broker-delivered", { callId: "call-failed", toolName: "shell" }),
+    event("2026-08-14T10:00:02.000Z", "broker", "broker-failed", { callId: "call-failed", toolName: "shell" }),
+  ]);
+  expect(summary).toMatchObject({ brokerToolCallCount: 1, unresolvedBrokerCallCount: 0 });
+});
+
 test("an unusual process restart inside an attempt is reflected in its compact summary", () => {
   const summary = summarizeFlightEvents([
     event("2026-08-14T10:00:00.000Z", "browser", "browser-attempt-started"),

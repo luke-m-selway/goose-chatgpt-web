@@ -202,7 +202,7 @@ export class TurnBroker {
     channel.invocations.delete(callId);
     recordChatGptFlightEvent({
       category: "broker",
-      event: "broker-completed",
+      event: result.isError === true ? "broker-failed" : "broker-completed",
       traceId: channel.traceId,
       callId,
       toolName: invocation.request.wireName,
