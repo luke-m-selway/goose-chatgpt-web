@@ -14,11 +14,18 @@ Status: **current/proven**, with one named validation gap.
 - Ordered macOS autostart is implemented with one login-visible coordinator that invokes canonical `lifecycle start`; daemon/tunnel launchd definitions live under the runtime home and remain launchd-supervised.
 - The earlier failed in-task lifecycle/autostart proof was self-interference from the active BrowserHost-backed turn, not a general Electron regression.
 
-Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item, but Goose Control is no longer deferred behind additional Electron reliability work.
+Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item.
 
-## Active next milestone — Goose Control first proof
+Draft PR #31's development runtime is deployed at
+`f54ba39305a6e6a101aa599db1409ab46b9666a1` with passive flight recording enabled. Its native
+liveness design/review has passed, and natural usage has established a genuine parent plus two async
+ChatGPT-Web child topology with genuine three-surface overlap. Reliable parent-plus-two-child
+completion is still **NOT QUALIFIED**. The current reliability phase is ecological observation of
+ordinary single-agent and naturally delegated use, not another designated synthetic run.
 
-Status: **active; not implemented yet**.
+## Next feature milestone — Goose Control first proof
+
+Status: **next after the passive reliability closeout; not implemented yet**.
 
 Build the smallest end-to-end Planner-to-Goose bridge described in [`goose-control-plan.md`](goose-control-plan.md):
 
@@ -68,10 +75,16 @@ reboot/login
 
 Do not perform this from a Goose turn that depends on the runtime being restarted.
 
-## Provisional Electron-native liveness qualification
+## Active passive Electron-native liveness observation
 
-The current feature candidate and its committed qualification procedure are documented in
-[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md). Static/unit
-tests and a two-way slow→recovered live observation are evidence; the new deterministic ordinary-Goose
-three-surface proof and separate natural parent → two async children proof are still pending and must
-not be described as qualified before their exact procedures pass.
+The current feature candidate and its retained qualification procedures are documented in
+[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md). Native
+liveness design/review, genuine natural parent-plus-two-async-child topology, and genuine
+three-surface overlap are established. Multiple runs nevertheless exposed acknowledgement,
+Responses-transport, transient ChatGPT UI, and broker-continuation failure classes, so reliable
+completion remains **NOT QUALIFIED**.
+
+The deterministic qualification runner remains available as reusable tooling. It is not the current
+next action. The deployed passive recorder described in
+[`chatgpt-web-flight-recorder.md`](chatgpt-web-flight-recorder.md) now accumulates correlated evidence
+from ordinary use without an observer or designated workload.

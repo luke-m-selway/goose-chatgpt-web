@@ -66,7 +66,8 @@ observations/
 ```
 
 `events.jsonl` uses single-line, append-mode JSON records. `summary.json` is atomically replaced from
-the trace journal, and `index.jsonl` receives a compact record when a browser attempt terminates.
+the trace journal, and `index.jsonl` receives one compact finalized record only after both the
+browser-attempt termination and the outer Responses transport settlement are available.
 Trace summaries contain request/trace identity hashes, trusted session identity when already present,
 transport outcomes, browser lifecycle/outcomes, compact broker lifecycle, retry lineage, concurrency,
 transient UI state, process identity observed naturally, and screenshot counts.

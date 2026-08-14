@@ -38,6 +38,13 @@ Status as of 2026-08-12: **current/proven**, with one explicitly unrun autostart
 
 The known-good Electron checkpoint is `c624274` (`Checkpoint proven Electron lifecycle and Goose inference`). Current `main` then adds `dd44b74` (`Add ordered macOS autostart coordinator`).
 
+Separately, draft PR #31's development runtime is deployed at
+`f54ba39305a6e6a101aa599db1409ab46b9666a1`. Its native liveness design/review has passed, a genuine
+parent plus two async ChatGPT-Web child topology and genuine three-surface overlap have been
+observed, and passive flight recording is enabled for ordinary use. Reliable parent-plus-two-child
+completion remains **NOT QUALIFIED**; the deployed development revision does not replace the proven
+`c624274`/`dd44b74` lifecycle/autostart baseline.
+
 The canonical lifecycle is:
 
 ```text
@@ -73,9 +80,18 @@ codex-chatgpt-web autostart <status|install|trigger|disable>
 
 Those literal names are inherited implementation identifiers; they do not change the Goose-first ownership model above.
 
-## Next active milestone — Goose Control
+## Passive reliability closeout and next feature milestone
 
-Goose Control is now the next active project milestone. It is a Planner-to-Goose management path and is separate from both Electron BrowserHost identity and Goose Native's per-turn `turn_token` authority.
+The current reliability phase uses the in-process passive flight recorder to collect correlated
+browser, Responses transport, broker, navigation, network-failure, and screenshot evidence during
+ordinary single-agent and naturally delegated ChatGPT-Web work. Designated synthetic qualification
+is paused in favor of that ecological evidence. See
+[`docs/chatgpt-web-flight-recorder.md`](docs/chatgpt-web-flight-recorder.md) and
+[`docs/chatgpt-web-concurrency-qualification.md`](docs/chatgpt-web-concurrency-qualification.md).
+
+After this reliability closeout, Goose Control remains the next feature milestone. It is a
+Planner-to-Goose management path and is separate from both Electron BrowserHost identity and Goose
+Native's per-turn `turn_token` authority.
 
 The settled backend is authenticated loopback `goose serve` ACP. The first practical Planner-facing proof is intentionally small:
 
@@ -98,6 +114,8 @@ Start with [`docs/README.md`](docs/README.md). It classifies current, active, de
 
 - [`docs/architecture.md`](docs/architecture.md) — current ownership and request/tool flow.
 - [`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md) — canonical lifecycle, BrowserHost readiness, autostart status, and proof boundaries.
+- [`docs/chatgpt-web-flight-recorder.md`](docs/chatgpt-web-flight-recorder.md) — active passive observation for ordinary ChatGPT-Web use.
+- [`docs/chatgpt-web-concurrency-qualification.md`](docs/chatgpt-web-concurrency-qualification.md) — current liveness/concurrency evidence and qualification status.
 - [`docs/goose-control-plan.md`](docs/goose-control-plan.md) — next active Goose Control milestone.
 - [`docs/roadmap.md`](docs/roadmap.md) — current and next work only.
 - [`docs/security-model.md`](docs/security-model.md) — trust and capability boundaries.

@@ -1,11 +1,12 @@
 # ChatGPT-Web concurrency and Electron-liveness qualification
 
-Status: **implementation candidate**. Static/unit tests are passing at this checkpoint. The
-deterministic three-surface proof remains **NOT RUN / pending**. The natural parent → two async
-children proof has now run once, on 2026-08-13, and returned `NATURAL PARENT + 2: FAIL` (topology
-formed correctly; Child A's background task never persisted a result). See "Evidence already
-observed" below and the persistent `natural-analyze` tooling that reproduces this classification
-from persisted evidence alone.
+Status at deployed development revision
+`f54ba39305a6e6a101aa599db1409ab46b9666a1`: native liveness design/review **PASS**; genuine parent
+plus two async ChatGPT-Web child topology **ESTABLISHED**; genuine three-surface overlap
+**ESTABLISHED**; reliable parent-plus-two-child completion **NOT QUALIFIED**. Passive flight
+recording is enabled for ordinary single-agent and naturally delegated use. Designated synthetic
+qualification is paused in favor of ecological evidence; the committed deterministic and natural
+analyzers remain reusable tooling.
 
 Independent review of PR #31 recorded these gates:
 
@@ -13,19 +14,14 @@ Independent review of PR #31 recorded these gates:
 - the roughly 76–80 second stale-control plus prolonged-indeterminate model: **PASS**;
 - qualification analyzer/runner correctness at `c84b28d06702c80cd22b2cb9459898ceef8f4c82`:
   **PASS**;
-- exact source/runtime revision match at the runtime reviewed on 2026-08-13: **FAIL**.
+- exact source/runtime activation at the current deployed development checkpoint
+  `f54ba39305a6e6a101aa599db1409ab46b9666a1`: **SATISFIED**;
+- passive observation enabled in the deployed runtime: **YES**.
 
-Those analyzer/runner repairs are now part of the candidate, but no live proof has been run against
-them. The reviewed runtime is not eligible for a qualification baseline: its helper and Electron
-processes predated committed liveness evidence. One operator-controlled exact-revision activation
-and the content-based preflight below are mandatory before the next baseline.
-
-For reviewed commit `7b998fbaa82adbf5b400c50248478c272b057761`, **CURRENT RUNTIME MATCHES
-COMMIT: NO**. The active helper lacked `dom-read-summary failures=` and `nativeRevision=`, the
-BrowserHost process predated the committed BrowserHost/control-server writes, and post-start logs did
-not contain the committed lifecycle object on `browser.turn_started`. This is an operational revision
-mismatch, not a native-liveness design failure. It must be repaired only at the next authorized
-operator activation boundary; no restart was performed while recording or repairing this checkpoint.
+The 2026-08-13 review did find a genuine operational revision mismatch: the then-running helper and
+Electron processes predated committed liveness evidence. That finding is historical and was not a
+native-liveness design failure. Subsequent exact-revision activations closed it, culminating in the
+currently deployed `f54ba39305a6e6a101aa599db1409ab46b9666a1` runtime with observation enabled.
 
 This document is the operating procedure for qualifying the current Electron-native liveness
 candidate. It deliberately separates BrowserHost three-surface liveness from recursive Goose
@@ -54,18 +50,21 @@ DOM progress, or native `responsive` event may still recover the turn. Only
 `indeterminate-terminal` means that grace was exhausted; the analyzer treats only the latter as
 terminal control-liveness evidence.
 
-## Mandatory exact-revision activation and preflight
+## Retained exact-revision activation and preflight procedure
 
-This is an **operator-only, disruptive prerequisite**, not part of `baseline`, `analyze`, or the
-qualification runner. Do not perform it from a turn using the runtime being restarted. It pins the
-exact independently reviewed repair commit; every check is fail-closed.
+The exact-runtime activation requirement is **satisfied** for the current deployed development
+checkpoint `f54ba39305a6e6a101aa599db1409ab46b9666a1`. The procedure below is retained for a future
+explicitly authorized designated run or revision change. It is an **operator-only, disruptive
+prerequisite**, not part of `baseline`, `analyze`, or the qualification runner, and must never be
+performed from a turn using the runtime being restarted. Set `qualification_commit` to the exact
+reviewed target; every check is fail-closed. It is not the current next action.
 
 ```bash
 set -euo pipefail
 
 qualification_repo="/Users/luke/Documents/goose-chatgpt-web"
 qualification_runtime_home="/Users/luke/.goose-chatgpt-web-dev"
-qualification_commit="c84b28d06702c80cd22b2cb9459898ceef8f4c82"
+qualification_commit="f54ba39305a6e6a101aa599db1409ab46b9666a1"
 qualification_launcher_log="/Users/luke/Library/Logs/Codex Web GPT/launcher.jsonl"
 
 cd "$qualification_repo"
@@ -288,10 +287,11 @@ parameter `async` with default `false`; only `delegate(..., async: true)` select
 path. The recipes stabilize source identity, provider/model, tools, workload, and marker. They do not
 stabilize scheduling.
 
-## Natural recursive-topology proof
+## Retained natural recursive-topology proof
 
-After the deterministic three-surface proof passes, establish a fresh clean monitor baseline and run
-the high-model parent using the committed prompt:
+For a future explicitly authorized designated recursive run, establish a fresh clean monitor
+baseline and run the high-model parent using the committed prompt. This remains useful tooling, but
+is not the current next action:
 
 ```bash
 natural_dir="/Users/luke/.goose-chatgpt-web-dev/qualification/natural-$(date +%Y%m%d-%H%M%S)"
@@ -370,12 +370,13 @@ with every gating component (`topologyFormation`, `parentNativeWorkBeforeLoad`, 
 `processStability`, `runtimeIntegrity`, `childCompletion`, `parentMarker`) at `PASS`. The generic
 `analyze` verdict alone must never be presented as recursive-topology proof.
 
-## Manual actor / passive-observer protocol
+## Retained manual actor / passive-observer protocol
 
-This is the permanent procedure for a human-run natural proof, separate from the deterministic
-three-independent-session runner above (which launches its own `goose run` processes and needs no
-manual actor). The observer never starts Goose, never sends anything to ChatGPT-Web, never leases a
-BrowserHost surface, and never restarts anything — it only reads already-persisted evidence.
+This is the retained procedure for a future explicitly authorized human-run natural proof, separate
+from the deterministic three-independent-session runner above (which launches its own `goose run`
+processes and needs no manual actor). It is not required for the active ordinary-use flight-recording
+phase. When used, the observer never starts Goose, never sends anything to ChatGPT-Web, never leases
+a BrowserHost surface, and never restarts anything — it only reads already-persisted evidence.
 
 1. Start the observer baseline (`bun run scripts/chatgpt-web-qualification.ts baseline ...`, as
    above).
@@ -446,11 +447,40 @@ timeout. This is a send-acknowledgement/control-path observation failure, not ev
 prompt remained unsent. Diagnostic captures also began timing out only after the concurrent
 children were active, and their timeout wrapper does not cancel the underlying diagnostic action.
 
-The next qualification revision adds trace-scoped send press/poll timing, diagnostic outstanding
-and late-settlement evidence, and timed-out stage late-settlement evidence. It is observation-only:
-it changes no timeout, polling cadence, concurrency behavior, cancellation behavior, retry, or
-classification, and it does **not** claim a fix for the failed natural qualification.
+Later run `natural-instrumented-20260814-120226` again formed a genuine parent plus two async-child
+topology. Parent trace `cd2f23884e6f`, Child A trace `61dbd9fc8854`, and Child B trace
+`67d163585322` all completed the send press and obtained submission acknowledgement on the first
+polling iteration; no send timeout occurred. All three performed substantial ChatGPT-Web/Goose
+Native work. The run still failed reliable completion:
+
+- Parent and Child A lost their outer Responses bodies about **603–606 seconds** after their last
+  successful tool-result continuation. Their existing ChatGPT Temporary Chat pages remained viable
+  when outer cancellation aborted the browser turns. Retained evidence did not localize the failure
+  to a specific network, Responses bridge, BrowserHost IPC, Playwright transport, or renderer layer.
+- Child B's page visibly showed `Connection interrupted. Waiting for the complete answer`. It kept
+  the same trace and owned surface; no replacement browser attempt was proved. The evidence then
+  available could not distinguish a same-surface navigation, reload, or application reset from a UI
+  transition.
+- Child B's final Goose tool result was persisted but never completed back through the broker,
+  exposing a broker/tool-continuation orphaning class.
+- The bounded logs showed tunnel PID replacement `66477 → 67822`, but its causal relevance to the
+  stream failures was **NOT ESTABLISHED**. This run predated correlated per-request Electron network-
+  failure recording, so it contains no authoritative request-level network-failure event either way.
+
+Together with `natural-20260814-111148`, the observed failure classes are therefore
+send/control-acknowledgement false negatives, outer Responses-body failure while browser pages remain
+viable, ChatGPT-native interrupted/reset ambiguity, and broker/tool-continuation orphaning. These are
+correlations and classifications, not a localized root-cause claim.
+
+The observation-only instrumentation is now committed and deployed through
+`f54ba39305a6e6a101aa599db1409ab46b9666a1`. It records correlated request/Responses-body settlement,
+browser outcome, broker and retry lineage, same-surface navigation, aggregate last-successful
+transport activity, relevant Electron/Chromium request failures, and native screenshot evidence.
+It changes no timeout, polling cadence, concurrency, cancellation, retry, recovery, or error
+classification.
 
 The candidate's static/unit coverage, previously qualified long-turn behavior, and earlier
-independent concurrency qualifications remain evidence inputs. The deterministic three-surface proof
-may not be marked proven until its exact committed command is run and its artifacts are retained.
+independent concurrency qualifications remain evidence inputs. Reliable parent-plus-two-child
+completion remains **NOT QUALIFIED**. The chosen next phase is passive ordinary-use evidence; the
+deterministic runner and designated natural procedure remain available but are not the current next
+action and must not be described as passed without retained passing artifacts.

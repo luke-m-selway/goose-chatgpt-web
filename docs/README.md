@@ -19,9 +19,22 @@ This directory is the authoritative handoff for the current Goose-first runtime 
 - [`security-model.md`](security-model.md) — current trust/capability boundaries.
 - [`../AGENTS.md`](../AGENTS.md) — mandatory runtime/safety rules for agents.
 
-The qualified runtime base is the Electron checkpoint `c624274` plus current-main autostart commit `dd44b74`.
+The proven lifecycle/autostart base remains Electron checkpoint `c624274` plus current-main autostart
+commit `dd44b74`. Draft PR #31's development runtime is separately deployed at
+`f54ba39305a6e6a101aa599db1409ab46b9666a1`, with passive observation enabled; that deployment does
+not upgrade parent-plus-two-child completion reliability to proven status.
 
-## Active milestone
+## Active reliability checkpoint
+
+- [`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md) records the
+  current Electron-native liveness qualification status. A genuine parent plus two async
+  ChatGPT-Web child topology and genuine three-surface overlap are established. Reliable completion
+  remains **NOT QUALIFIED**. Passive flight recording is active for ordinary single-agent and
+  naturally delegated use; another designated synthetic run is not the current next action.
+- [`chatgpt-web-flight-recorder.md`](chatgpt-web-flight-recorder.md) documents the active passive
+  observation phase and its privacy/storage boundaries.
+
+## Next feature milestone
 
 - [`goose-control-plan.md`](goose-control-plan.md) — Goose Control is the next active milestone. Its backend is settled on authenticated loopback Goose ACP; its first Planner-facing proof is a private GPT Action calling a narrow authenticated HTTPS REST/OpenAPI facade.
 - [`roadmap.md`](roadmap.md) — current and next work only.
@@ -30,7 +43,8 @@ The qualified runtime base is the Electron checkpoint `c624274` plus current-mai
 
 The actual Mac **reboot/login → automatic reconstruction → ordinary Goose first turn → separate dependent `--resume`** proof has not been run. Ordered autostart is implemented and live-checked without that reboot boundary.
 
-[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md) defines the committed qualification checkpoint for the Electron-native liveness implementation candidate. Its static/unit coverage and two-way slow→recovered observation exist; the deterministic three-surface and natural parent → two async children proofs remain pending.
+Reliable parent-plus-two-child completion remains unqualified despite established topology and
+overlap. Ordinary-use passive evidence is the chosen next qualification phase.
 
 No document may silently upgrade that item to proven status.
 

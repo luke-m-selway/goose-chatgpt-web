@@ -5,6 +5,11 @@ Status: **current/proven** through manual/canonical lifecycle, live ordered-auto
 Known-good Electron checkpoint: `c624274` (`Checkpoint proven Electron lifecycle and Goose inference`).
 Current-main autostart checkpoint: `dd44b74` (`Add ordered macOS autostart coordinator`).
 
+These are the proven lifecycle/autostart checkpoints, not the newest deployed development revision.
+Draft PR #31 is currently deployed at `f54ba39305a6e6a101aa599db1409ab46b9666a1` with passive
+observation enabled; that deployment does not change the lifecycle proof boundaries below or qualify
+reliable parent-plus-two-child completion.
+
 ## Ownership
 
 The standalone Goose runtime has three separately owned infrastructure layers:
