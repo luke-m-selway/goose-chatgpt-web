@@ -128,6 +128,22 @@ The first ordinary Day Shift / Goose Control retry using the substantial workloa
 problem appeared to proceed normally after activation. Treat this as encouraging ecological evidence,
 not as a new formal qualification verdict.
 
+### Subsequent broker-timeout continuation observation
+
+Later ordinary ChatGPT-Web work produced a useful inline recovery signal after two targeted edits had
+already landed. The running agent reported:
+
+> The first two targeted edits landed, but the tool bridge then hit a transient ChatGPT-Web broker
+> timeout. I’m continuing the same logical session as requested rather than treating that as a
+> lost-session condition.
+
+Record this as ecological evidence, not as a formally reconstructed trace verdict. It is consistent with
+the current operating assumption that a transient browser/tool-broker failure does not necessarily mean
+the Goose logical session has been lost, and that a normal later continuation is preferable to
+immediately discarding the session when state remains usable. If the corresponding passive trace is ever
+reviewed, correlate the broker event, persisted edits/tool results, outer transport settlement, and the
+subsequent continuation before assigning a stronger failure classification.
+
 ## Current operating envelope
 
 Use ChatGPT-Web as a normal capable Goose parent. Do not reduce it to single-shot prompts merely because
@@ -160,8 +176,11 @@ These remain open without blocking normal use:
 2. Two earlier natural failures lost outer Responses bodies roughly 603-606 seconds after the last
    successful tool-result continuation while the browser pages remained viable. The precise failing
    layer is still unresolved.
-3. ChatGPT-native `Connection interrupted. Waiting for the complete answer` and broker/tool-continuation
-   orphaning remain known natural failure classes.
+3. ChatGPT-native `Connection interrupted. Waiting for the complete answer`, broker/tool-continuation
+   orphaning, and transient broker timeouts remain known natural failure classes. A transient broker
+   timeout has now also been observed inline during otherwise productive work without immediately
+   forcing abandonment of the logical Goose session; the exact trace-level recovery path remains to be
+   correlated if needed.
 4. Pre-Goose-Native startup latency remains worth measuring if it is disruptive. The current path waits
    on real Temporary Chat/composer/model-effort readiness rather than one long fixed sleep.
 5. Large-prompt attachment latency is a separate performance item; the natural incident measured about
