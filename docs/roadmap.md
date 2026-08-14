@@ -4,7 +4,7 @@ This file contains **current and next work only**. The older chronological engin
 
 ## Current runtime checkpoint — qualified
 
-Status: **current/proven**, with one named validation gap.
+Status: **current/proven**, with named remaining reliability and lifecycle gaps.
 
 - Electron BrowserHost ownership is BrowserHost-only.
 - Responses daemon and Secure MCP Tunnel are independently supervised.
@@ -14,52 +14,76 @@ Status: **current/proven**, with one named validation gap.
 - Ordered macOS autostart is implemented with one login-visible coordinator that invokes canonical `lifecycle start`; daemon/tunnel launchd definitions live under the runtime home and remain launchd-supervised.
 - The earlier failed in-task lifecycle/autostart proof was self-interference from the active BrowserHost-backed turn, not a general Electron regression.
 
-Remaining validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit lifecycle validation item.
+Remaining lifecycle validation: **actual Mac reboot/login reconstruction is NOT RUN.** This remains an explicit operator-controlled validation item.
 
 Draft PR #31's development runtime is deployed at
-`f54ba39305a6e6a101aa599db1409ab46b9666a1` with passive flight recording enabled. Its native
-liveness design/review has passed, and natural usage has established a genuine parent plus two async
-ChatGPT-Web child topology with genuine three-surface overlap. Reliable parent-plus-two-child
-completion is still **NOT QUALIFIED**. The current reliability phase is ecological observation of
-ordinary single-agent and naturally delegated use, not another designated synthetic run.
+`7f99f187295135de1507c3fcd63aca08e9c01810` with passive flight recording enabled. Its native
+liveness design/review has passed, ordinary multi-turn ChatGPT-Web use and native ChatGPT-Web
+subagent delegation are established, and natural usage has established a genuine parent plus two
+async ChatGPT-Web child topology with genuine three-surface overlap. Reliable parent-plus-two-child
+completion is still **NOT QUALIFIED**.
 
-## Next feature milestone — Goose Control first proof
+A natural Day Shift workload exposed a browser-control self-interference defect: a timed-out
+Playwright diagnostic could remain outstanding and overlap a later critical stage while the Electron
+WebContents remained visibly alive and authenticated. `7f99f187...` removes routine launcher
+Playwright diagnostics from the critical path, blocks stale same-trace diagnostic overlap, preserves
+real `composer_ready` failures, and adds bounded composer/control telemetry. The first ordinary retry
+of the workload that exposed the issue appeared to proceed normally after activation. See
+[`chatgpt-web-reliability-closeout.md`](chatgpt-web-reliability-closeout.md).
 
-Status: **next after the passive reliability closeout; not implemented yet**.
+## Current reliability phase — ordinary-use observation
 
-Build the smallest end-to-end Planner-to-Goose bridge described in [`goose-control-plan.md`](goose-control-plan.md):
+The current reliability phase is ecological observation of ordinary work, not another designated
+synthetic run.
+
+Use ChatGPT-Web as a normal capable Goose parent:
+
+- allow multiple consecutive parent turns;
+- allow ordinary Goose Native tool use and meaningful bounded milestones;
+- when another strong ChatGPT-Web model genuinely adds value, use at most **one ChatGPT-Web child at a time** for now, especially for diff review, adversarial review, independent diagnosis, or architecture/minimalism review;
+- do not make parent + two simultaneous ChatGPT-Web children the routine pattern yet;
+- do not stop healthy work to inspect or protect the passive recorder.
+
+If another real failure occurs, preserve it and inspect the passive observation corpus first. Add
+heavier instrumentation only if that corpus exposes a specific evidence gap.
+
+Remaining reliability unknowns that do not block normal use:
+
+- reliable parent + two child completion remains **NOT QUALIFIED**;
+- two earlier outer Responses bodies failed roughly 603–606 seconds after the last successful tool-result continuation while the browser pages remained viable; the failing layer remains unlocalized;
+- ChatGPT-native connection interruption and broker/tool-continuation orphaning remain known natural failure classes;
+- pre-Goose-Native startup latency is worth measuring only if it remains disruptive;
+- large-prompt attachment performance remains a later item; a natural incident measured about 21.2 seconds for a ~24.6k-character prompt versus about 2.8 seconds for a shorter control.
+
+The retained deterministic and natural qualification tooling remains available, but another designated
+run is not the current next action.
+
+## Active feature work — Goose Control in Day Shift
+
+Goose Control work has resumed in the separate Day Shift repository:
+
+- GitHub: `luke-m-selway/day-shift`
+- local: `/Users/luke/Documents/day-shift`
+
+This repository does **not** own Goose Control implementation. The architectural boundary remains:
 
 ```text
 ChatGPT Planner
-  → private custom GPT
-  → GPT Action
-  → authenticated HTTPS REST/OpenAPI facade
-  → authenticated loopback Goose ACP
-  → one hard-approved persisted Goose session
+  ↕
+Goose Control
+  ↕
+ordinary Goose harness
+  ↕
+providers / tools / delegates / ACP specialists
+  ↕
+ChatGPT-Web is one provider beneath Goose
 ```
 
-First-proof requirements:
+Goose Control should remain provider-agnostic. Do not put ChatGPT-Web BrowserHost recovery,
+concurrency policy, or transport-specific orchestration into the Goose Control protocol.
 
-- continuation only;
-- short synchronous bounded `submit_turn`;
-- mandatory idempotent `request_id`;
-- final user-visible Goose result only;
-- no arbitrary cwd/provider/model;
-- no new sessions;
-- no multi-target registry;
-- no cancellation;
-- no Orchestrator/Palmate;
-- no Electron/lifecycle/autostart changes.
-
-The ACP backend and persisted-session contract are settled. Do not spend this milestone rediscovering browser identity, inventing a second Goose session API, or treating Orchestrator as the transport.
-
-## Next Goose Control phases — deferred until the first proof
-
-1. If measured GPT Action behavior requires it, or after the synchronous bridge is proven, introduce `submit_task → job_id → get_job` around native ACP `session/prompt`.
-2. Add cancellation through native ACP cancellation when needed.
-3. Add a deterministic server-controlled target registry after one-target behavior is stable.
-4. Add approved fresh-session profiles through ACP `session/new` only if real workflows require them.
-5. Dogfood direct Planner → Goose Control before inserting a persistent Orchestrator/Palmate workflow layer.
+[`goose-control-plan.md`](goose-control-plan.md) remains useful design history/context, but current
+implementation truth belongs to the Day Shift repository.
 
 ## Separate remaining runtime validation
 
@@ -75,16 +99,12 @@ reboot/login
 
 Do not perform this from a Goose turn that depends on the runtime being restarted.
 
-## Active passive Electron-native liveness observation
+## Retained qualification procedure
 
-The current feature candidate and its retained qualification procedures are documented in
-[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md). Native
-liveness design/review, genuine natural parent-plus-two-async-child topology, and genuine
-three-surface overlap are established. Multiple runs nevertheless exposed acknowledgement,
-Responses-transport, transient ChatGPT UI, and broker-continuation failure classes, so reliable
-completion remains **NOT QUALIFIED**.
+[`chatgpt-web-concurrency-qualification.md`](chatgpt-web-concurrency-qualification.md) retains the
+committed qualification procedures and earlier evidence. Its deployed-revision status text predates
+the `7f99f187...` closeout; use
+[`chatgpt-web-reliability-closeout.md`](chatgpt-web-reliability-closeout.md) for current runtime status.
 
-The deterministic qualification runner remains available as reusable tooling. It is not the current
-next action. The deployed passive recorder described in
-[`chatgpt-web-flight-recorder.md`](chatgpt-web-flight-recorder.md) now accumulates correlated evidence
-from ordinary use without an observer or designated workload.
+[`chatgpt-web-flight-recorder.md`](chatgpt-web-flight-recorder.md) remains authoritative for passive
+recorder behavior, privacy, and storage boundaries.

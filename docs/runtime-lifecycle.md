@@ -6,9 +6,10 @@ Known-good Electron checkpoint: `c624274` (`Checkpoint proven Electron lifecycle
 Current-main autostart checkpoint: `dd44b74` (`Add ordered macOS autostart coordinator`).
 
 These are the proven lifecycle/autostart checkpoints, not the newest deployed development revision.
-Draft PR #31 is currently deployed at `f54ba39305a6e6a101aa599db1409ab46b9666a1` with passive
-observation enabled; that deployment does not change the lifecycle proof boundaries below or qualify
-reliable parent-plus-two-child completion.
+Draft PR #31 is currently deployed at `7f99f187295135de1507c3fcd63aca08e9c01810` with passive
+observation enabled. That deployment includes the natural browser-control diagnostic isolation repair
+documented in [`chatgpt-web-reliability-closeout.md`](chatgpt-web-reliability-closeout.md); it does not
+change the lifecycle proof boundaries below or qualify reliable parent-plus-two-child completion.
 
 ## Ownership
 
@@ -123,6 +124,11 @@ Fresh ChatGPT Temporary Chats across Goose user turns are expected because Goose
 
 Do not test stop/restart/autostart lifecycle behavior from an active BrowserHost-backed turn that depends on the exact runtime being manipulated. A prior failed in-task proof was narrowed to this self-interference. It must not be recorded as a general Electron or autostart regression.
 
+The same principle now applies to browser-control diagnostics: launcher/Electron turns do not run routine
+Playwright screenshot/evaluate diagnostics on the critical browser path. The passive Electron-native
+recorder supplies independent visual/lifecycle evidence without adding a second Playwright/CDP control
+operation. See the reliability closeout for the natural incident that established this boundary.
+
 ## Current non-regression rules
 
 - Keep daemon and tunnel supervision independent from Electron.
@@ -130,4 +136,5 @@ Do not test stop/restart/autostart lifecycle behavior from an active BrowserHost
 - Keep BrowserHost readiness on the descriptor-provided Node/Electron Node helper path.
 - Release disposable lifecycle leases in `finally`.
 - Preserve the original causal error rather than replacing it with later retry/cleanup symptoms.
+- Do not let a timed-out diagnostic control operation overlap a subsequent critical stage on the same trace.
 - Do not repeat expensive runtime proofs merely because old historical docs mention them; re-run only the proof relevant to a changed contract.
