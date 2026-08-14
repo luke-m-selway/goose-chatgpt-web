@@ -186,6 +186,7 @@ export class ChatGptFlightRecorder {
       const eventId = randomUUID();
       safe.eventId = eventId;
       const shouldIndex = input.event === "browser-attempt-ended"
+        || input.event === "sse-activity-settled"
         || (input.category === "responses" && [
           "body-normal-close", "body-error", "client-cancellation",
         ].includes(input.event));
@@ -390,7 +391,9 @@ export class ChatGptFlightRecorder {
     const transportEnded = events.some(event => [
       "body-normal-close", "body-error", "client-cancellation",
     ].includes(String(event.event)));
-    if (!browserEnded || !transportEnded) return;
+    const streamingRequest = events.some(event => event.event === "request-accepted" && event.stream === true);
+    const sseSettled = events.some(event => event.event === "sse-activity-settled");
+    if (!browserEnded || !transportEnded || (streamingRequest && !sseSettled)) return;
 
     const markerPath = join(directory, ".indexed-v1");
     let marker;
@@ -448,6 +451,8 @@ export function summarizeFlightEvents(
   let transient = false;
   let abnormalProcess = false;
   let screenshots = 0;
+  let navigationEvents = 0;
+  let unexpectedNavigation = false;
   for (const event of ordered) {
     if (typeof event.activeBrowserTurns === "number") maxActive = Math.max(maxActive, event.activeBrowserTurns);
     if (event.category === "broker" && typeof event.callId === "string") {
@@ -466,6 +471,10 @@ export function summarizeFlightEvents(
       transportOutcome = event.event;
     }
     if (event.event === "screenshot-retained") screenshots += 1;
+    if (String(event.event).startsWith("browser-navigation-")) {
+      navigationEvents += 1;
+      if (event.unexpectedNavigation === true) unexpectedNavigation = true;
+    }
   }
   const latest = (field: string) => [...ordered].reverse().find(event => event[field] !== undefined)?.[field] ?? null;
   return {
@@ -488,6 +497,21 @@ export function summarizeFlightEvents(
     outcome: browserEnd?.outcome ?? null,
     errorClassification: browserEnd?.errorClassification ?? null,
     responsesTransportOutcome: transportOutcome,
+    sseFrameCount: latest("sseFrameCount"),
+    sseByteCount: latest("sseByteCount"),
+    heartbeatFrameCount: latest("heartbeatFrameCount"),
+    lastSuccessfulEnqueueElapsedMs: latest("lastSuccessfulEnqueueElapsedMs"),
+    terminalEventEnqueued: latest("terminalEventEnqueued"),
+    doneEnqueued: latest("doneEnqueued"),
+    sseSettlement: latest("sseSettlement"),
+    bodyChunkCount: latest("bodyChunkCount"),
+    bodyByteCount: latest("bodyByteCount"),
+    lastSuccessfulBodyChunkElapsedMs: latest("lastSuccessfulBodyChunkElapsedMs"),
+    finalBodyOutcome: latest("finalBodyOutcome"),
+    navigationEventCount: navigationEvents,
+    unexpectedNavigationObserved: unexpectedNavigation,
+    lastNavigationKind: latest("navigationKind"),
+    lastNavigationUrlPathHash: latest("urlPathHash"),
     retryCount,
     replacementTraceId,
     transientConnectionInterrupted: transient,

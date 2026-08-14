@@ -76,6 +76,17 @@ interface OutputItem {
 
 export type ResponsesTerminalStatus = "completed" | "failed" | "incomplete";
 
+export interface ResponsesSseActivityAggregate {
+  frameCount: number;
+  byteCount: number;
+  heartbeatFrameCount: number;
+  lastSuccessfulEnqueueElapsedMs: number | null;
+  terminalEventEnqueued: boolean;
+  doneEnqueued: boolean;
+  settlement: "normal-close" | "client-cancellation" | "stream-error" | "enqueue-error";
+  elapsedMs: number;
+}
+
 export function bridgeToResponsesSSE(
   events: AsyncIterable<AdapterEvent>,
   modelId: string,
@@ -101,6 +112,10 @@ export function bridgeToResponsesSSE(
     onTerminal?: (status: ResponsesTerminalStatus) => void;
     /** The terminal [DONE] marker was enqueued. */
     onDone?: () => void;
+    /** One compact settlement record; never called per frame or heartbeat. */
+    onActivitySettled?: (activity: ResponsesSseActivityAggregate) => void;
+    /** Deterministic test seam for elapsed aggregate timings; production uses performance.now(). */
+    activityNow?: () => number;
     onCompletedResponse?: (response: Record<string, unknown>, providerState?: CodexProviderContinuationState) => void;
     /** Test seam for the platform-specific Bun stream transport. */
     streamPlatform?: NodeJS.Platform;
@@ -146,6 +161,8 @@ export function bridgeToResponsesSSE(
   };
   const encoder = new TextEncoder();
   const responseId = options?.responseId ?? `resp_${uuid()}`;
+  const activityNow = options?.activityNow ?? (() => performance.now());
+  const activityStartedAt = activityNow();
   let seq = 0;
   // Set once the client is gone (cancel) or an enqueue throws on a torn-down controller, so we
   // never enqueue again and never throw a second time inside start() — the RC2 double-throw that
@@ -153,10 +170,14 @@ export function bridgeToResponsesSSE(
   let closed = false;
   let clientCancelled = false;
   let terminalReported = false;
+  const reportObservation = (action: (() => void) | undefined) => {
+    if (!action) return;
+    try { action(); } catch { /* observation-only */ }
+  };
   const reportTerminal = (status: ResponsesTerminalStatus) => {
     if (terminalReported || clientCancelled || closed) return;
     terminalReported = true;
-    options?.onTerminal?.(status);
+    reportObservation(() => options?.onTerminal?.(status));
   };
   // RC3 keep-alive: Codex's idle timer is timeout(idle_timeout, stream.next()) over an
   // eventsource_stream; ANY received event re-arms it, while an unknown type is ignored
@@ -166,27 +187,62 @@ export function bridgeToResponsesSSE(
   let beat: ReturnType<typeof setInterval> | undefined;
   let controller: ReadableStreamDefaultController<Uint8Array>;
   let emittedFrames = 0;
+  let emittedBytes = 0;
+  let heartbeatFrames = 0;
+  let lastSuccessfulEnqueueElapsedMs: number | null = null;
+  let terminalEventEnqueued = false;
+  let doneEnqueued = false;
+  let activitySettlementReported = false;
+  const noteSuccessfulEnqueue = (frame: Uint8Array, kind: "event" | "heartbeat" | "done", name?: string) => {
+    emittedFrames += 1;
+    emittedBytes += frame.byteLength;
+    if (kind === "heartbeat") heartbeatFrames += 1;
+    if (kind === "done") doneEnqueued = true;
+    if (name === "response.completed" || name === "response.failed" || name === "response.incomplete") {
+      terminalEventEnqueued = true;
+    }
+    lastSuccessfulEnqueueElapsedMs = Math.max(0, Math.round(activityNow() - activityStartedAt));
+  };
+  const settleActivity = (settlement: ResponsesSseActivityAggregate["settlement"]) => {
+    if (activitySettlementReported) return;
+    activitySettlementReported = true;
+    const elapsedMs = Math.max(0, Math.round(activityNow() - activityStartedAt));
+    reportObservation(() => options?.onActivitySettled?.({
+      frameCount: emittedFrames,
+      byteCount: emittedBytes,
+      heartbeatFrameCount: heartbeatFrames,
+      lastSuccessfulEnqueueElapsedMs,
+      terminalEventEnqueued,
+      doneEnqueued,
+      settlement,
+      elapsedMs,
+    }));
+  };
   let gated = false;
   let stepping = false;
   const emit = (name: string, data: Record<string, unknown>) => {
         if (closed) return;
         activity = true;
         try {
-          controller.enqueue(encoder.encode(sseEvent(name, { type: name, sequence_number: seq++, ...data })));
-          if (emittedFrames === 0) options?.onFirstFrame?.();
-          emittedFrames++;
+          const frame = encoder.encode(sseEvent(name, { type: name, sequence_number: seq++, ...data }));
+          controller.enqueue(frame);
+          noteSuccessfulEnqueue(frame, "event", name);
+          if (emittedFrames === 1) reportObservation(options?.onFirstFrame);
         } catch {
           closed = true;
+          settleActivity("enqueue-error");
         }
       };
       const emitDone = () => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          options?.onDone?.();
-          emittedFrames++;
+          const frame = encoder.encode("data: [DONE]\n\n");
+          controller.enqueue(frame);
+          noteSuccessfulEnqueue(frame, "done");
+          reportObservation(options?.onDone);
         } catch {
           closed = true;
+          settleActivity("enqueue-error");
         }
       };
 
@@ -809,6 +865,7 @@ export function bridgeToResponsesSSE(
         /* already closed (e.g. client cancelled) */
       }
       closed = true;
+      settleActivity("normal-close");
       gated = true;
       stepping = false;
       };
@@ -841,13 +898,15 @@ export function bridgeToResponsesSSE(
             beat = undefined;
             try { controller.close(); } catch { /* already closed */ }
             closed = true;
+            settleActivity("normal-close");
             return;
           }
           try {
             controller.enqueue(heartbeatFrame);
-            emittedFrames++;
+            noteSuccessfulEnqueue(heartbeatFrame, "heartbeat");
           } catch {
             closed = true;
+            settleActivity("enqueue-error");
           }
         }, heartbeatMs);
       };
@@ -872,6 +931,7 @@ export function bridgeToResponsesSSE(
     clientCancelled = true;
     closed = true;
     if (beat) clearInterval(beat);
+    settleActivity("client-cancellation");
     onCancel?.("client");
     returnIterator();
   };
@@ -888,6 +948,7 @@ export function bridgeToResponsesSSE(
           if (closed) return;
           closed = true;
           if (beat) clearInterval(beat);
+          settleActivity("stream-error");
           onCancel?.("stream-error");
           returnIterator();
           try { controller.error(error); } catch { /* already closed */ }

@@ -10,7 +10,7 @@ import {
   summarizeFlightEvents,
 } from "../src/observations/flight-recorder";
 import { AsyncEventQueue } from "../src/event-queue";
-import { bridgeToResponsesSSE } from "../src/bridge";
+import { bridgeToResponsesSSE, type ResponsesSseActivityAggregate } from "../src/bridge";
 import type { AdapterEvent } from "../src/types";
 import { HttpTurnCounter, registerResponseTransportObservation } from "../src/server";
 import { reportChatGptBrowserEvidence } from "../src/adapters/chatgpt-web/browser-worker";
@@ -67,6 +67,79 @@ test("SSE bridge reports first frame, terminal response, and DONE without observ
   expect(observed).toEqual(["first", "completed", "done"]);
 });
 
+test("SSE settlement reports aggregate frames, bytes, terminal state, DONE, and last enqueue", async () => {
+  const queue = new AsyncEventQueue<AdapterEvent>();
+  queue.push({ type: "text_delta", text: "private answer", phase: "final_answer" });
+  queue.push({ type: "done", stopReason: "stop", endTurn: true });
+  queue.close();
+  let clock = 0;
+  let aggregate: ResponsesSseActivityAggregate | undefined;
+  const stream = bridgeToResponsesSSE(queue, "model", undefined, undefined, undefined, undefined, 2_000, {
+    activityNow: () => clock += 7,
+    onActivitySettled: activity => { aggregate = activity; },
+  });
+  const body = new Uint8Array(await new Response(stream).arrayBuffer());
+  const decoded = new TextDecoder().decode(body);
+  const frames = decoded.split("\n\n").filter(Boolean);
+
+  expect(aggregate).toMatchObject({
+    frameCount: frames.length,
+    byteCount: body.byteLength,
+    heartbeatFrameCount: 0,
+    terminalEventEnqueued: true,
+    doneEnqueued: true,
+    settlement: "normal-close",
+  });
+  expect(aggregate!.lastSuccessfulEnqueueElapsedMs).toBeGreaterThan(0);
+  expect(aggregate!.elapsedMs).toBeGreaterThanOrEqual(aggregate!.lastSuccessfulEnqueueElapsedMs!);
+});
+
+test("SSE aggregate counts successful heartbeat enqueues without per-frame observations", async () => {
+  async function* delayedCompletion(): AsyncGenerator<AdapterEvent> {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    yield { type: "done", stopReason: "stop", endTurn: true };
+  }
+  let aggregate: ResponsesSseActivityAggregate | undefined;
+  const body = await new Response(bridgeToResponsesSSE(
+    delayedCompletion(),
+    "model",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    2,
+    {
+      stallTimeoutSec: 1,
+      streamPlatform: "win32",
+      onActivitySettled: activity => { aggregate = activity; },
+    },
+  )).text();
+  const heartbeatFrames = body.match(/event: response\.heartbeat/g)?.length ?? 0;
+
+  expect(heartbeatFrames).toBeGreaterThan(0);
+  expect(aggregate?.heartbeatFrameCount).toBe(heartbeatFrames);
+  expect(aggregate?.byteCount).toBe(new TextEncoder().encode(body).byteLength);
+});
+
+test("SSE aggregate observation failure cannot affect stream completion", async () => {
+  const queue = new AsyncEventQueue<AdapterEvent>();
+  queue.push({ type: "done", stopReason: "stop", endTurn: true });
+  queue.close();
+  const body = await new Response(bridgeToResponsesSSE(
+    queue,
+    "model",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    2_000,
+    { onActivitySettled: () => { throw new Error("synthetic observation failure"); } },
+  )).text();
+
+  expect(body).toContain("event: response.completed");
+  expect(body).toEndWith("data: [DONE]\n\n");
+});
+
 test("submission poll windows persist only compact per-iteration timing metadata", async () => {
   const directory = root();
   const recorder = configureChatGptFlightRecorder({ enabled: true, rootDir: directory });
@@ -119,6 +192,42 @@ test("outer body cancellation is recorded before a later browser outcome", async
     "utf8",
   ).trim().split("\n").map(line => JSON.parse(line));
   expect(events.map(item => item.event)).toEqual(["client-cancellation", "browser-attempt-ended"]);
+  expect(events[0]).toMatchObject({
+    finalBodyOutcome: "client-cancellation",
+    bodyChunkCount: 0,
+    bodyByteCount: 0,
+    lastSuccessfulBodyChunkElapsedMs: null,
+  });
+});
+
+test("outer body normal close aggregates successful chunk delivery", async () => {
+  const directory = root();
+  const recorder = configureChatGptFlightRecorder({ enabled: true, rootDir: directory });
+  const counter = new HttpTurnCounter();
+  const response = await counter.track(async () => registerResponseTransportObservation(
+    new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(1, 2));
+        controller.enqueue(Uint8Array.of(3, 4, 5));
+        controller.close();
+      },
+    })),
+    { traceId: "trace_body_complete", requestId: "request-body-complete", startedAt: Date.now() },
+  ), undefined, "darwin");
+  expect(new Uint8Array(await response.arrayBuffer())).toEqual(Uint8Array.of(1, 2, 3, 4, 5));
+  await recorder.flush();
+  const events = readFileSync(
+    join(directory, new Date().toISOString().slice(0, 10), "trace_body_complete", "events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map(line => JSON.parse(line));
+
+  expect(events.at(-1)).toMatchObject({
+    event: "body-normal-close",
+    finalBodyOutcome: "normal-close",
+    bodyChunkCount: 2,
+    bodyByteCount: 5,
+  });
+  expect(events.at(-1).lastSuccessfulBodyChunkElapsedMs).toBeNumber();
 });
 
 test("request signal abort records outer client cancellation", async () => {
@@ -172,6 +281,75 @@ test("a browser outcome can precede an independently observed outer body failure
   expect(index[0]).toMatchObject({ traceId: "trace_body_error", responsesTransportOutcome: "body-error" });
 });
 
+test("outer body settlement reports successful chunks, bytes, and last activity immediately before error", async () => {
+  const directory = root();
+  const recorder = configureChatGptFlightRecorder({ enabled: true, rootDir: directory });
+  const startedAt = Date.now() - 612_345;
+  let reads = 0;
+  const counter = new HttpTurnCounter();
+  const response = await counter.track(async () => registerResponseTransportObservation(
+    new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (reads++ === 0) controller.enqueue(Uint8Array.of(1, 2, 3, 4));
+        else controller.error(new Error("synthetic late body failure"));
+      },
+    })),
+    { traceId: "trace_late_body_activity", requestId: "request-late-body-activity", startedAt },
+  ), undefined, "darwin");
+  const reader = response.body!.getReader();
+  expect((await reader.read()).value).toEqual(Uint8Array.of(1, 2, 3, 4));
+  await expect(reader.read()).rejects.toThrow("synthetic late body failure");
+  await recorder.flush();
+  const events = readFileSync(
+    join(directory, new Date().toISOString().slice(0, 10), "trace_late_body_activity", "events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map(line => JSON.parse(line));
+  const settled = events.at(-1);
+
+  expect(settled).toMatchObject({
+    event: "body-error",
+    requestId: "request-late-body-activity",
+    finalBodyOutcome: "body-error",
+    bodyChunkCount: 1,
+    bodyByteCount: 4,
+  });
+  expect(settled.lastSuccessfulBodyChunkElapsedMs).toBeGreaterThanOrEqual(612_345);
+  expect(settled.elapsedMs - settled.lastSuccessfulBodyChunkElapsedMs).toBeLessThan(100);
+});
+
+test("outer body aggregate represents an arbitrary long idle interval without a special timeout assumption", async () => {
+  const directory = root();
+  const recorder = configureChatGptFlightRecorder({ enabled: true, rootDir: directory });
+  const arbitraryIdleMs = 713_421;
+  const counter = new HttpTurnCounter();
+  const response = await counter.track(async () => registerResponseTransportObservation(
+    new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { controller.error(new Error("synthetic idle body failure")); },
+    })),
+    {
+      traceId: "trace_arbitrary_idle",
+      requestId: "request-arbitrary-idle",
+      startedAt: Date.now() - arbitraryIdleMs,
+    },
+  ), undefined, "darwin");
+  await expect(response.body!.getReader().read()).rejects.toThrow("synthetic idle body failure");
+  await recorder.flush();
+  const events = readFileSync(
+    join(directory, new Date().toISOString().slice(0, 10), "trace_arbitrary_idle", "events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map(line => JSON.parse(line));
+  const settled = events.at(-1);
+
+  expect(settled).toMatchObject({
+    event: "body-error",
+    bodyChunkCount: 0,
+    bodyByteCount: 0,
+    lastSuccessfulBodyChunkElapsedMs: null,
+  });
+  expect(settled.elapsedMs).toBeGreaterThanOrEqual(arbitraryIdleMs);
+  expect(settled.elapsedMs).toBeLessThan(arbitraryIdleMs + 100);
+});
+
 test("ordering and six-hundred-second durations are represented without a special timeout assumption", () => {
   const start = "2026-08-14T10:00:00.000Z";
   const cancelledBeforeBrowser = summarizeFlightEvents([
@@ -189,6 +367,91 @@ test("ordering and six-hundred-second durations are represented without a specia
   ]);
   expect(browserBeforeBody.durationMs).toBe(605_000);
   expect(browserBeforeBody.responsesTransportOutcome).toBe("body-error");
+});
+
+test("compact summary retains aggregate transport and same-surface navigation evidence", () => {
+  const summary = summarizeFlightEvents([
+    event("2026-08-14T10:00:00.000Z", "browser", "browser-navigation-load-finished", {
+      navigationKind: "initial-bootstrap",
+      unexpectedNavigation: false,
+      urlPathHash: "a".repeat(32),
+    }),
+    event("2026-08-14T10:00:05.000Z", "browser", "browser-navigation-in-page", {
+      navigationKind: "same-document-navigation",
+      unexpectedNavigation: true,
+      urlPathHash: "b".repeat(32),
+    }),
+    event("2026-08-14T10:10:02.000Z", "responses", "sse-activity-settled", {
+      sseFrameCount: 308,
+      sseByteCount: 65_432,
+      heartbeatFrameCount: 295,
+      lastSuccessfulEnqueueElapsedMs: 602_000,
+      terminalEventEnqueued: false,
+      doneEnqueued: false,
+      sseSettlement: "client-cancellation",
+    }),
+    event("2026-08-14T10:10:03.000Z", "responses", "body-error", {
+      finalBodyOutcome: "body-error",
+      bodyChunkCount: 308,
+      bodyByteCount: 65_432,
+      lastSuccessfulBodyChunkElapsedMs: 602_000,
+    }),
+  ]);
+
+  expect(summary).toMatchObject({
+    sseFrameCount: 308,
+    sseByteCount: 65_432,
+    heartbeatFrameCount: 295,
+    lastSuccessfulEnqueueElapsedMs: 602_000,
+    terminalEventEnqueued: false,
+    doneEnqueued: false,
+    bodyChunkCount: 308,
+    bodyByteCount: 65_432,
+    lastSuccessfulBodyChunkElapsedMs: 602_000,
+    finalBodyOutcome: "body-error",
+    navigationEventCount: 2,
+    unexpectedNavigationObserved: true,
+    lastNavigationKind: "same-document-navigation",
+    lastNavigationUrlPathHash: "b".repeat(32),
+  });
+});
+
+test("streaming trace index waits for browser, body, and SSE aggregate settlement", async () => {
+  const directory = root();
+  const recorder = new ChatGptFlightRecorder(resolveFlightRecorderConfig({ enabled: true, rootDir: directory }));
+  const traceId = "trace_index_aggregate";
+  recorder.record({ category: "request", event: "request-accepted", traceId, requestId: "request-index", stream: true });
+  recorder.record({ category: "browser", event: "browser-attempt-ended", traceId, outcome: "aborted" });
+  recorder.record({
+    category: "responses",
+    event: "body-error",
+    traceId,
+    requestId: "request-index",
+    finalBodyOutcome: "body-error",
+    bodyChunkCount: 300,
+  });
+  await recorder.flush();
+  expect(() => readFileSync(join(directory, "index.jsonl"), "utf8")).toThrow();
+
+  recorder.record({
+    category: "responses",
+    event: "sse-activity-settled",
+    traceId,
+    requestId: "request-index",
+    sseFrameCount: 300,
+    heartbeatFrameCount: 290,
+    sseSettlement: "client-cancellation",
+  });
+  await recorder.flush();
+  const index = readFileSync(join(directory, "index.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(index).toHaveLength(1);
+  expect(index[0]).toMatchObject({
+    traceId,
+    responsesTransportOutcome: "body-error",
+    bodyChunkCount: 300,
+    sseFrameCount: 300,
+    heartbeatFrameCount: 290,
+  });
 });
 
 test("broker incompletion, retry replacement, and transient UI state remain queryable", () => {

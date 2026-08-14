@@ -73,6 +73,14 @@ transient UI state, process identity observed naturally, and screenshot counts.
 Tunnel PID replacement is recorded from the launcher's existing health monitor; the recorder adds no
 process polling of its own.
 
+Responses settlement records include aggregate SSE frame/byte/heartbeat counts, the elapsed time of
+the last successful enqueue, terminal/DONE enqueue flags, and aggregate outer-body chunk/byte/last-
+activity timing. Individual text frames, heartbeats, and HTTP chunks are not journaled. BrowserHost
+also records its existing native load-start/load-finish/load-stop and in-page-navigation callbacks.
+Navigation records contain only origin/Temporary-Chat booleans and a deterministic origin/path hash;
+query values, fragments, and complete URLs are omitted. Navigation after the initial Temporary Chat
+bootstrap pins the existing native screenshot ring.
+
 Structured records deliberately exclude prompt and assistant bodies, tool arguments and result
 bodies, request headers, cookies, authentication material, and secrets. Error telemetry records
 classification/name metadata, not arbitrary payload text. Structured journals and summaries are not

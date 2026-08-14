@@ -33,6 +33,7 @@ const {
   CHATGPT_VIEWPORT_CSS,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  privacySafeNavigationIdentity,
   validateChatGptStorageState,
 } = require("../electron/browser-host.cjs");
 
@@ -681,12 +682,13 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   );
 });
 
-function lifecycleContents(rendererPid) {
+function lifecycleContents(rendererPid, initialUrl = "https://chatgpt.com/?temporary-chat=true") {
   const contents = new EventEmitter();
   let destroyed = false;
+  let currentUrl = initialUrl;
   Object.assign(contents, {
     setWindowOpenHandler() {},
-    getURL: () => "https://chatgpt.com/?temporary-chat=true",
+    getURL: () => currentUrl,
     getOSProcessId: () => rendererPid,
     isDestroyed: () => destroyed,
     insertCSS: async () => "css-key",
@@ -696,6 +698,7 @@ function lifecycleContents(rendererPid) {
       contents.emit("destroyed");
     },
     markDestroyed() { destroyed = true; },
+    setURL(url) { currentUrl = url; },
   });
   return contents;
 }
@@ -729,6 +732,110 @@ function lifecycleTab(id, traceId, surfaceId, helperPid, rendererPid) {
     view: { webContents: lifecycleContents(rendererPid) },
   };
 }
+
+test("turn navigation evidence distinguishes initial bootstrap from later reload and in-page navigation", () => {
+  const tab = lifecycleTab(
+    "tab-navigation",
+    "trace_navigation",
+    "surface_navigation_0123456789AB",
+    710,
+    8130,
+  );
+  tab.view.webContents.setURL("about:blank#codex-web-gpt-browser-host");
+  const fixture = lifecycleFixture([tab]);
+  const records = [];
+  const pins = [];
+  fixture.flightRecorder = {
+    updateSurface() {},
+    record(traceId, event, detail) { records.push({ traceId, event, detail }); },
+    observe(traceId, event) { pins.push({ traceId, event }); },
+  };
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  tab.view.webContents.emit("did-start-loading");
+  tab.view.webContents.emit("did-finish-load");
+  tab.view.webContents.emit("did-stop-loading");
+  tab.view.webContents.setURL("https://chatgpt.com/?temporary-chat=true");
+  tab.view.webContents.emit("did-start-loading");
+  tab.view.webContents.emit("did-finish-load");
+  tab.view.webContents.emit("did-stop-loading");
+
+  assert.equal(records.filter(record => record.detail.navigationKind === "initial-bootstrap").length, 6);
+  assert.equal(pins.length, 0);
+
+  tab.view.webContents.emit("did-start-loading");
+  tab.view.webContents.emit("did-finish-load");
+  tab.view.webContents.emit("did-stop-loading");
+  tab.view.webContents.emit(
+    "did-navigate-in-page",
+    {},
+    "https://chatgpt.com/?temporary-chat=true#replacement-state",
+    true,
+  );
+
+  const later = records.slice(6);
+  assert.deepEqual(later.map(record => record.detail.navigationKind), [
+    "full-document-navigation-or-reload",
+    "full-document-navigation-or-reload",
+    "full-document-navigation-or-reload",
+    "same-document-navigation",
+  ]);
+  assert.equal(later.every(record => record.detail.unexpectedNavigation === true), true);
+  assert.deepEqual(pins.map(pin => pin.event), [
+    "browser-navigation-load-started",
+    "browser-navigation-in-page",
+  ]);
+  assert.equal(later.every(record => record.detail.rendererPid === 8130), true);
+});
+
+test("navigation metadata hashes path identity without persisting URL contents", () => {
+  const first = privacySafeNavigationIdentity(
+    "https://chatgpt.com/?temporary-chat=true&private=value-one#secret-fragment",
+  );
+  const second = privacySafeNavigationIdentity(
+    "https://chatgpt.com/?temporary-chat=true&private=value-two#different-fragment",
+  );
+  const conversation = privacySafeNavigationIdentity("https://chatgpt.com/c/private-conversation-id");
+
+  assert.deepEqual(first, second);
+  assert.equal(first.isChatGptOrigin, true);
+  assert.equal(first.isTemporaryChat, true);
+  assert.match(first.urlPathHash, /^[a-f0-9]{32}$/);
+  assert.equal(conversation.isChatGptOrigin, true);
+  assert.equal(conversation.isTemporaryChat, false);
+  assert.notEqual(conversation.urlPathHash, first.urlPathHash);
+  assert.doesNotMatch(JSON.stringify({ first, conversation }), /value-one|secret-fragment|private-conversation-id/);
+});
+
+test("navigation observation failure cannot affect WebContents lifecycle state", async () => {
+  const tab = lifecycleTab(
+    "tab-navigation-observer-failure",
+    "trace_navigation_observer_failure",
+    "surface_navigation_observer_failure_012345",
+    711,
+    8131,
+  );
+  tab.navigationLifecycle = { loadSequence: 1, bootstrapComplete: true, activeLoad: null };
+  const fixture = lifecycleFixture([tab]);
+  fixture.flightRecorder = {
+    updateSurface() {},
+    record() { throw new Error("synthetic observation failure"); },
+    observe() { return Promise.reject(new Error("synthetic async observation failure")); },
+  };
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  assert.doesNotThrow(() => tab.view.webContents.emit("did-start-loading"));
+  assert.equal(tab.loading, true);
+  fixture.flightRecorder.record = () => {};
+  assert.doesNotThrow(() => tab.view.webContents.emit(
+    "did-navigate-in-page",
+    {},
+    "https://chatgpt.com/?temporary-chat=true#still-running",
+    true,
+  ));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(tab.url, "https://chatgpt.com/?temporary-chat=true#still-running");
+});
 
 test("Electron unresponsive and responsive events degrade then recover the owned turn", () => {
   const tab = lifecycleTab(

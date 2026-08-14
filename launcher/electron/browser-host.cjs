@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomBytes } = require("node:crypto");
+const { createHash, randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
@@ -108,6 +108,25 @@ function isTemporaryChatUrl(value) {
   return parsed.origin === CHATGPT_ORIGIN
     && parsed.pathname === "/"
     && parsed.searchParams.get("temporary-chat") === "true";
+}
+
+function privacySafeNavigationIdentity(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return {
+      isChatGptOrigin: false,
+      isTemporaryChat: false,
+      urlPathHash: createHash("sha256").update("invalid-url").digest("hex").slice(0, 32),
+    };
+  }
+  return {
+    isChatGptOrigin: parsed.origin === CHATGPT_ORIGIN,
+    isTemporaryChat: isTemporaryChatUrl(value),
+    // Deliberately excludes query values and fragments while retaining stable path identity.
+    urlPathHash: createHash("sha256").update(`${parsed.origin}${parsed.pathname}`).digest("hex").slice(0, 32),
+  };
 }
 
 function isSessionRefreshRedirectAbort(error) {
@@ -400,6 +419,11 @@ class BrowserHost {
       rendererLifecycleEvent: "created",
       rendererLifecycleRevision: 0,
       rendererLifecycleReason: undefined,
+      navigationLifecycle: {
+        loadSequence: 0,
+        bootstrapComplete: false,
+        activeLoad: null,
+      },
     };
     this.turnTabs.set(id, tab);
     this.window.contentView.addChildView(view);
@@ -439,6 +463,11 @@ class BrowserHost {
 
   bindTurnContents(tab) {
     const contents = tab.view.webContents;
+    const navigation = tab.navigationLifecycle ??= {
+      loadSequence: 0,
+      bootstrapComplete: false,
+      activeLoad: null,
+    };
     contents.setWindowOpenHandler(({ url }) => {
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
@@ -447,17 +476,61 @@ class BrowserHost {
     });
     contents.on("did-start-loading", () => {
       tab.loading = true;
+      navigation.loadSequence += 1;
+      const navigationKind = navigation.bootstrapComplete
+        ? "full-document-navigation-or-reload"
+        : "initial-bootstrap";
+      const unexpectedNavigation = navigation.bootstrapComplete;
+      navigation.activeLoad = {
+        sequence: navigation.loadSequence,
+        navigationKind,
+        unexpectedNavigation,
+      };
+      this.recordTurnNavigation(tab, "browser-navigation-load-started", contents.getURL(), {
+        navigationKind,
+        loadSequence: navigation.loadSequence,
+        unexpectedNavigation,
+        pin: unexpectedNavigation,
+      });
       this.publishState?.(this.snapshot());
     });
     contents.on("did-stop-loading", () => {
       tab.loading = false;
       tab.url = contents.getURL();
+      const activeLoad = navigation.activeLoad;
+      this.recordTurnNavigation(tab, "browser-navigation-load-stopped", tab.url, {
+        navigationKind: activeLoad?.navigationKind ?? (navigation.bootstrapComplete
+          ? "full-document-navigation-or-reload"
+          : "initial-bootstrap"),
+        loadSequence: activeLoad?.sequence ?? navigation.loadSequence,
+        unexpectedNavigation: activeLoad?.unexpectedNavigation === true,
+      });
+      navigation.activeLoad = null;
       this.publishState?.(this.snapshot());
     });
     contents.on("did-finish-load", () => {
       this.refreshRendererPid(tab);
       tab.url = contents.getURL();
       tab.loading = false;
+      const identity = privacySafeNavigationIdentity(tab.url);
+      const activeLoad = navigation.activeLoad;
+      let unexpectedNavigation = activeLoad?.unexpectedNavigation === true;
+      if (!navigation.bootstrapComplete && identity.isTemporaryChat) {
+        navigation.bootstrapComplete = true;
+        unexpectedNavigation = false;
+      } else if (!navigation.bootstrapComplete
+        && navigation.loadSequence > 1
+        && tab.url !== IDLE_BROWSER_URL) {
+        unexpectedNavigation = true;
+      }
+      this.recordTurnNavigation(tab, "browser-navigation-load-finished", tab.url, {
+        navigationKind: activeLoad?.navigationKind ?? (navigation.bootstrapComplete
+          ? "full-document-navigation-or-reload"
+          : "initial-bootstrap"),
+        loadSequence: activeLoad?.sequence ?? navigation.loadSequence,
+        unexpectedNavigation,
+        pin: unexpectedNavigation && activeLoad?.unexpectedNavigation !== true,
+      });
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
       void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
       const encoded = JSON.stringify(tab.surfaceId);
@@ -480,7 +553,18 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) tab.url = url;
+      if (mainFrame) {
+        tab.url = url;
+        const identity = privacySafeNavigationIdentity(url);
+        const wasBootstrapped = navigation.bootstrapComplete;
+        if (!navigation.bootstrapComplete && identity.isTemporaryChat) navigation.bootstrapComplete = true;
+        this.recordTurnNavigation(tab, "browser-navigation-in-page", url, {
+          navigationKind: wasBootstrapped ? "same-document-navigation" : "initial-bootstrap",
+          loadSequence: navigation.loadSequence,
+          unexpectedNavigation: wasBootstrapped,
+          pin: wasBootstrapped,
+        });
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
@@ -571,6 +655,27 @@ class BrowserHost {
     const rendererPid = this.readRendererPid(tab.view?.webContents);
     if (rendererPid) tab.rendererPid = rendererPid;
     return tab.rendererPid ?? null;
+  }
+
+  recordTurnNavigation(tab, event, url, options = {}) {
+    try {
+      const identity = privacySafeNavigationIdentity(url);
+      const rendererPid = this.refreshRendererPid(tab);
+      this.flightRecorder?.updateSurface(tab.surfaceId, { rendererPid });
+      this.flightRecorder?.record(tab.traceId, event, {
+        navigationKind: options.navigationKind || "unknown",
+        loadSequence: Number.isSafeInteger(options.loadSequence) ? options.loadSequence : 0,
+        unexpectedNavigation: options.unexpectedNavigation === true,
+        rendererPid,
+        ...identity,
+      });
+      if (options.pin === true) {
+        const pin = this.flightRecorder?.observe(tab.traceId, event);
+        if (pin && typeof pin.catch === "function") void pin.catch(() => {});
+      }
+    } catch {
+      // Navigation observation is passive and must never affect WebContents lifecycle handling.
+    }
   }
 
   updateTurnLifecycle(tab, status, event, reason) {
@@ -1652,6 +1757,7 @@ module.exports = {
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  privacySafeNavigationIdentity,
   TEMPORARY_CHAT_URL,
   validateChatGptStorageState,
 };

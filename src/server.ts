@@ -47,6 +47,10 @@ interface ResponseTransportObservation {
   startedAt: number;
   settled?: boolean;
   onSettled?: () => void;
+  bodyChunkCount?: number;
+  bodyByteCount?: number;
+  lastSuccessfulBodyChunkElapsedMs?: number;
+  cancellationRequested?: boolean;
 }
 
 const responseTransportObservations = new WeakMap<Response, ResponseTransportObservation>();
@@ -68,8 +72,29 @@ function recordResponseTransport(
   try { context.onSettled?.(); } catch {}
   recordChatGptFlightEvent({
     category: "responses", event, traceId: context.traceId, requestId: context.requestId,
+    finalBodyOutcome: event === "body-normal-close" ? "normal-close" : event,
+    bodyChunkCount: context.bodyChunkCount ?? 0,
+    bodyByteCount: context.bodyByteCount ?? 0,
+    lastSuccessfulBodyChunkElapsedMs: context.lastSuccessfulBodyChunkElapsedMs ?? null,
     elapsedMs: Date.now() - context.startedAt,
   });
+}
+
+function recordSuccessfulResponseBodyChunk(
+  context: ResponseTransportObservation | undefined,
+  chunk: Uint8Array,
+): void {
+  if (!context || context.settled) return;
+  context.bodyChunkCount = (context.bodyChunkCount ?? 0) + 1;
+  context.bodyByteCount = (context.bodyByteCount ?? 0) + chunk.byteLength;
+  context.lastSuccessfulBodyChunkElapsedMs = Math.max(0, Date.now() - context.startedAt);
+}
+
+function observedBodyOutcome(
+  context: ResponseTransportObservation | undefined,
+  fallback: "body-normal-close" | "body-error",
+): "body-normal-close" | "body-error" | "client-cancellation" {
+  return context?.cancellationRequested === true ? "client-cancellation" : fallback;
 }
 
 export class HttpTurnCounter {
@@ -107,8 +132,10 @@ export class HttpTurnCounter {
         return response;
       }
       if (signal?.aborted) {
-        recordResponseTransport(observation, "client-cancellation");
-        void response.body.cancel(signal.reason).catch(() => {});
+        if (observation) observation.cancellationRequested = true;
+        void response.body.cancel(signal.reason).catch(() => {}).finally(() => {
+          recordResponseTransport(observation, "client-cancellation");
+        });
         release();
         return response;
       }
@@ -119,8 +146,11 @@ export class HttpTurnCounter {
         // the original SSE reader without an eagerly drained tee branch racing the socket writer.
         const reader = response.body.getReader();
         abortListener = () => {
-          recordResponseTransport(observation, "client-cancellation");
-          void reader.cancel(signal?.reason).catch(() => {}).finally(release);
+          if (observation) observation.cancellationRequested = true;
+          void reader.cancel(signal?.reason).catch(() => {}).finally(() => {
+            recordResponseTransport(observation, "client-cancellation");
+            release();
+          });
         };
         signal?.addEventListener("abort", abortListener, { once: true });
         const body = new ReadableStream<Uint8Array>({
@@ -128,23 +158,25 @@ export class HttpTurnCounter {
             try {
               const chunk = await reader.read();
               if (chunk.done) {
-                recordResponseTransport(observation, "body-normal-close");
+                recordResponseTransport(observation, observedBodyOutcome(observation, "body-normal-close"));
                 release();
                 controller.close();
                 return;
               }
               controller.enqueue(chunk.value);
+              recordSuccessfulResponseBodyChunk(observation, chunk.value);
             } catch (error) {
-              recordResponseTransport(observation, "body-error");
+              recordResponseTransport(observation, observedBodyOutcome(observation, "body-error"));
               release();
               controller.error(error);
             }
           },
           async cancel(reason) {
-            recordResponseTransport(observation, "client-cancellation");
+            if (observation) observation.cancellationRequested = true;
             try {
               await reader.cancel(reason);
             } finally {
+              recordResponseTransport(observation, "client-cancellation");
               release();
             }
           },
@@ -163,20 +195,25 @@ export class HttpTurnCounter {
       const [clientBody, lifecycleBody] = response.body.tee();
       const reader = lifecycleBody.getReader();
       abortListener = () => {
-        recordResponseTransport(observation, "client-cancellation");
-        void reader.cancel(signal?.reason).catch(() => {});
-        void clientBody.cancel(signal?.reason).catch(() => {});
+        if (observation) observation.cancellationRequested = true;
+        void Promise.allSettled([
+          reader.cancel(signal?.reason),
+          clientBody.cancel(signal?.reason),
+        ]).finally(() => recordResponseTransport(observation, "client-cancellation"));
         release();
       };
       signal?.addEventListener("abort", abortListener, { once: true });
       void (async () => {
         try {
-          while (!(await reader.read()).done) {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            recordSuccessfulResponseBodyChunk(observation, chunk.value);
             // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
-          recordResponseTransport(observation, "body-normal-close");
+          recordResponseTransport(observation, observedBodyOutcome(observation, "body-normal-close"));
         } catch {
-          recordResponseTransport(observation, "body-error");
+          recordResponseTransport(observation, observedBodyOutcome(observation, "body-error"));
           // Stream failure is delivered to the client branch; lifecycle cleanup stays best-effort.
         } finally {
           release();
@@ -619,6 +656,21 @@ export async function responseRequest(
         }),
         onDone: () => recordChatGptFlightEvent({
           category: "responses", event: "done-enqueued", traceId: identity.traceId, requestId,
+          elapsedMs: Date.now() - requestStartedAt,
+        }),
+        onActivitySettled: activity => recordChatGptFlightEvent({
+          category: "responses",
+          event: "sse-activity-settled",
+          traceId: identity.traceId,
+          requestId,
+          sseFrameCount: activity.frameCount,
+          sseByteCount: activity.byteCount,
+          heartbeatFrameCount: activity.heartbeatFrameCount,
+          lastSuccessfulEnqueueElapsedMs: activity.lastSuccessfulEnqueueElapsedMs,
+          terminalEventEnqueued: activity.terminalEventEnqueued,
+          doneEnqueued: activity.doneEnqueued,
+          sseSettlement: activity.settlement,
+          sseElapsedMs: activity.elapsedMs,
           elapsedMs: Date.now() - requestStartedAt,
         }),
         ...(compaction ? { compaction: true } : {
