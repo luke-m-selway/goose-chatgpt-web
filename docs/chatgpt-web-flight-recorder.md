@@ -81,6 +81,17 @@ Navigation records contain only origin/Temporary-Chat booleans and a determinist
 query values, fragments, and complete URLs are omitted. Navigation after the initial Temporary Chat
 bootstrap pins the existing native screenshot ring.
 
+The BrowserHost also installs one failure-only `Session.webRequest.onErrorOccurred` listener on its
+existing persistent ChatGPT session. It is limited to HTTPS/WSS requests for `chatgpt.com`,
+`*.chatgpt.com`, `openai.com`, and `*.openai.com`, and maps failures only when `webContentsId` belongs
+to a currently running owned turn. Records contain the resource type, bounded Chromium error code and
+description, method, renderer/WebContents identity, a coarse origin classification, an origin/path
+hash, the instantaneous `net.isOnline()` value, and active-turn count. Full URLs, query strings,
+fragments, headers, cookies, and request/response bodies are never retained. A mapped failure pins the
+existing native screenshot ring but has no authority over browser health, navigation, or turn outcome.
+`net.isOnline() === false` is retained as evidence; `true` is not treated as proof that a remote
+ChatGPT/OpenAI endpoint was reachable.
+
 Structured records deliberately exclude prompt and assistant bodies, tool arguments and result
 bodies, request headers, cookies, authentication material, and secrets. Error telemetry records
 classification/name metadata, not arbitrary payload text. Structured journals and summaries are not

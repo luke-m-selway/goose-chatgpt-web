@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { WebContentsView, shell } = require("electron");
+const { WebContentsView, net, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -33,6 +33,20 @@ const MAX_LOGIN_ORIGINS = 128;
 const MAX_LOGIN_LOCAL_STORAGE_ENTRIES = 4_096;
 const MAX_LOGIN_STATE_STRING_CHARS = 2 * 1024 * 1024;
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
+const CHATGPT_NETWORK_FAILURE_FILTER = Object.freeze({
+  urls: Object.freeze([
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "wss://chatgpt.com/*",
+    "wss://*.chatgpt.com/*",
+    "https://openai.com/*",
+    "https://*.openai.com/*",
+    "wss://openai.com/*",
+    "wss://*.openai.com/*",
+  ]),
+});
+const CHATGPT_NETWORK_ERROR_MAX_CHARS = 160;
+const chatGptNetworkFailureBindings = new WeakMap();
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
 const COMPOSER_SELECTOR = [
@@ -126,6 +140,42 @@ function privacySafeNavigationIdentity(value) {
     isTemporaryChat: isTemporaryChatUrl(value),
     // Deliberately excludes query values and fragments while retaining stable path identity.
     urlPathHash: createHash("sha256").update(`${parsed.origin}${parsed.pathname}`).digest("hex").slice(0, 32),
+  };
+}
+
+function privacySafeNetworkRequestIdentity(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "wss:") return null;
+  const hostname = parsed.hostname.toLowerCase();
+  let originClassification;
+  if (hostname === "chatgpt.com") originClassification = "chatgpt-primary";
+  else if (hostname.endsWith(".chatgpt.com")) originClassification = "chatgpt-subdomain";
+  else if (hostname === "openai.com") originClassification = "openai-primary";
+  else if (hostname.endsWith(".openai.com")) originClassification = "openai-subdomain";
+  else return null;
+  return {
+    originClassification,
+    // Deliberately excludes query values and fragments while distinguishing network paths.
+    urlPathHash: createHash("sha256")
+      .update(`${parsed.protocol}//${hostname}${parsed.pathname}`)
+      .digest("hex")
+      .slice(0, 32),
+  };
+}
+
+function boundedChromiumNetworkError(value) {
+  const normalized = (typeof value === "string" ? value : "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, CHATGPT_NETWORK_ERROR_MAX_CHARS) || "unknown";
+  return {
+    chromiumErrorCode: normalized.match(/\bERR_[A-Z0-9_]+\b/)?.[0]?.slice(0, 64) || "UNKNOWN",
+    chromiumErrorDescription: normalized,
   };
 }
 
@@ -345,6 +395,7 @@ class BrowserHost {
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);
     this.bindChatGptBackendRecovery();
+    this.bindChatGptNetworkFailureObservation();
     this.bindWebContents();
     void this.view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
       this.logger.error("browser.initialization_failed", { message: error instanceof Error ? error.message : String(error) });
@@ -657,6 +708,10 @@ class BrowserHost {
     return tab.rendererPid ?? null;
   }
 
+  readNetworkOnlineState() {
+    return typeof net?.isOnline === "function" ? net.isOnline() : null;
+  }
+
   recordTurnNavigation(tab, event, url, options = {}) {
     try {
       const identity = privacySafeNavigationIdentity(url);
@@ -863,6 +918,73 @@ class BrowserHost {
       CHATGPT_BACKEND_REQUEST_FILTER,
       details => this.handleChatGptBackendResponse(details),
     );
+  }
+
+  bindChatGptNetworkFailureObservation() {
+    try {
+      const browserSession = this.view?.webContents?.session;
+      if (!browserSession?.webRequest?.onErrorOccurred) return false;
+      const existing = chatGptNetworkFailureBindings.get(browserSession);
+      if (existing) {
+        existing.host = this;
+        return false;
+      }
+      const binding = { host: this };
+      browserSession.webRequest.onErrorOccurred(
+        CHATGPT_NETWORK_FAILURE_FILTER,
+        details => {
+          try { binding.host?.handleChatGptNetworkRequestFailure(details); } catch {}
+        },
+      );
+      chatGptNetworkFailureBindings.set(browserSession, binding);
+      return true;
+    } catch {
+      // Network observation is passive and must never affect BrowserHost construction.
+      return false;
+    }
+  }
+
+  handleChatGptNetworkRequestFailure(details) {
+    let identity;
+    try { identity = privacySafeNetworkRequestIdentity(details?.url); } catch { return false; }
+    if (!identity || !Number.isInteger(details?.webContentsId)) return false;
+    const tab = [...this.turnTabs.values()].find(candidate => (
+      candidate.status === "running"
+      && candidate.view?.webContents?.id === details.webContentsId
+      && !candidate.view.webContents.isDestroyed?.()
+    ));
+    if (!tab) return false;
+
+    const activeBrowserTurns = [...this.turnTabs.values()]
+      .filter(candidate => candidate.status === "running").length;
+    let rendererPid = tab.rendererPid ?? null;
+    try { rendererPid = this.refreshRendererPid(tab); } catch {}
+    let netIsOnline = null;
+    try { netIsOnline = this.readNetworkOnlineState(); } catch {}
+    const error = boundedChromiumNetworkError(details.error);
+    const detail = {
+      surfaceId: tab.surfaceId,
+      rendererPid,
+      webContentsId: details.webContentsId,
+      networkRequestId: Number.isSafeInteger(details.id) ? details.id : null,
+      resourceType: typeof details.resourceType === "string"
+        ? details.resourceType.slice(0, 32)
+        : "other",
+      requestMethod: typeof details.method === "string"
+        ? details.method.replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 16) || "UNKNOWN"
+        : "UNKNOWN",
+      ...error,
+      ...identity,
+      netIsOnline: typeof netIsOnline === "boolean" ? netIsOnline : null,
+      activeBrowserTurns,
+    };
+    try { this.flightRecorder?.updateSurface(tab.surfaceId, { rendererPid }); } catch {}
+    try { this.flightRecorder?.record(tab.traceId, "browser-network-request-failed", detail); } catch {}
+    try {
+      const pin = this.flightRecorder?.observe(tab.traceId, "browser-network-request-failed");
+      if (pin && typeof pin.catch === "function") void pin.catch(() => {});
+    } catch {}
+    return true;
   }
 
   handleChatGptBackendResponse(details) {
@@ -1745,6 +1867,11 @@ class BrowserHost {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     this.turnTabs.clear();
+    try {
+      const browserSession = this.view?.webContents?.session;
+      const binding = browserSession && chatGptNetworkFailureBindings.get(browserSession);
+      if (binding?.host === this) binding.host = null;
+    } catch {}
     this.flightRecorder?.destroy();
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
@@ -1753,11 +1880,13 @@ class BrowserHost {
 module.exports = {
   allowedAuthUrl,
   BrowserHost,
+  CHATGPT_NETWORK_FAILURE_FILTER,
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   privacySafeNavigationIdentity,
+  privacySafeNetworkRequestIdentity,
   TEMPORARY_CHAT_URL,
   validateChatGptStorageState,
 };

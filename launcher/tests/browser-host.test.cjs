@@ -15,6 +15,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
     }
     return {
       WebContentsView,
+      net: { isOnline: () => true },
       shell: { openExternal: async () => {} },
     };
   }
@@ -30,10 +31,12 @@ const {
 const {
   allowedAuthUrl,
   BrowserHost,
+  CHATGPT_NETWORK_FAILURE_FILTER,
   CHATGPT_VIEWPORT_CSS,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   privacySafeNavigationIdentity,
+  privacySafeNetworkRequestIdentity,
   validateChatGptStorageState,
 } = require("../electron/browser-host.cjs");
 
@@ -119,6 +122,239 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
     responseHeaders: { "content-type": ["application/json"] },
   });
   assert.equal(fixture.cloudflareChallengeRecoveryArmed, true);
+});
+
+test("network failure listener is installed once without disturbing backend recovery", () => {
+  const calls = { completed: [], failed: [] };
+  const listeners = {};
+  const browserSession = {
+    webRequest: {
+      onCompleted(filter, listener) {
+        calls.completed.push(filter);
+        listeners.completed = listener;
+      },
+      onErrorOccurred(filter, listener) {
+        calls.failed.push(filter);
+        listeners.failed = listener;
+      },
+    },
+  };
+  const routed = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: { session: browserSession } },
+    handleChatGptBackendResponse: details => routed.push(["completed", details.id]),
+    handleChatGptNetworkRequestFailure: details => routed.push(["failed", details.id]),
+  });
+
+  BrowserHost.prototype.bindChatGptBackendRecovery.call(fixture);
+  assert.equal(BrowserHost.prototype.bindChatGptNetworkFailureObservation.call(fixture), true);
+  assert.equal(BrowserHost.prototype.bindChatGptNetworkFailureObservation.call(fixture), false);
+
+  assert.equal(calls.completed.length, 1);
+  assert.equal(calls.failed.length, 1);
+  assert.deepEqual(calls.failed[0], CHATGPT_NETWORK_FAILURE_FILTER);
+  listeners.completed({ id: 71 });
+  listeners.failed({ id: 72 });
+  assert.deepEqual(routed, [["completed", 71], ["failed", 72]]);
+});
+
+function networkFailureTab(id, traceId, surfaceId, webContentsId, rendererPid, status = "running") {
+  return {
+    id,
+    traceId,
+    surfaceId,
+    status,
+    rendererPid,
+    view: {
+      webContents: {
+        id: webContentsId,
+        getOSProcessId: () => rendererPid,
+        isDestroyed: () => false,
+      },
+    },
+  };
+}
+
+function networkFailureFixture(tabs, flightRecorder) {
+  return Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(tabs.map(tab => [tab.id, tab])),
+    flightRecorder,
+  });
+}
+
+test("concurrent network failures map by WebContents to independent active traces", () => {
+  const first = networkFailureTab(
+    "tab-network-a",
+    "trace_network_a",
+    "surface_network_a_0123456789AB",
+    701,
+    8701,
+  );
+  const second = networkFailureTab(
+    "tab-network-b",
+    "trace_network_b",
+    "surface_network_b_0123456789AB",
+    702,
+    8702,
+  );
+  const records = [];
+  const pins = [];
+  const fixture = networkFailureFixture([first, second], {
+    updateSurface() {},
+    record(traceId, event, detail) { records.push({ traceId, event, detail }); },
+    observe(traceId, event) { pins.push({ traceId, event }); },
+  });
+  fixture.readNetworkOnlineState = () => false;
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    id: 801,
+    url: "wss://events.chatgpt.com/backend-api/conversation/private-id?access_token=secret#fragment",
+    method: "GET",
+    webContentsId: 701,
+    resourceType: "webSocket",
+    error: "net::ERR_NETWORK_CHANGED",
+  }), true);
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    id: 802,
+    url: "https://api.openai.com/v1/private-resource?token=secret",
+    method: "POST",
+    webContentsId: 702,
+    resourceType: "xhr",
+    error: `net::ERR_CONNECTION_RESET ${"bounded-detail ".repeat(20)}`,
+  }), true);
+
+  assert.deepEqual(records.map(record => [record.traceId, record.detail.surfaceId]), [
+    [first.traceId, first.surfaceId],
+    [second.traceId, second.surfaceId],
+  ]);
+  assert.deepEqual(records[0], {
+    traceId: first.traceId,
+    event: "browser-network-request-failed",
+    detail: {
+      surfaceId: first.surfaceId,
+      rendererPid: 8701,
+      webContentsId: 701,
+      networkRequestId: 801,
+      resourceType: "webSocket",
+      requestMethod: "GET",
+      chromiumErrorCode: "ERR_NETWORK_CHANGED",
+      chromiumErrorDescription: "net::ERR_NETWORK_CHANGED",
+      originClassification: "chatgpt-subdomain",
+      urlPathHash: privacySafeNetworkRequestIdentity(
+        "wss://events.chatgpt.com/backend-api/conversation/private-id",
+      ).urlPathHash,
+      netIsOnline: false,
+      activeBrowserTurns: 2,
+    },
+  });
+  assert.deepEqual(pins, [
+    { traceId: first.traceId, event: "browser-network-request-failed" },
+    { traceId: second.traceId, event: "browser-network-request-failed" },
+  ]);
+  assert.equal(records[1].detail.chromiumErrorCode, "ERR_CONNECTION_RESET");
+  assert.equal(records[1].detail.chromiumErrorDescription.length, 160);
+  assert.doesNotMatch(JSON.stringify(records), /private-id|access_token|secret|private-resource/);
+});
+
+test("network failure telemetry ignores unrelated domains, WebContents, and inactive tabs", () => {
+  const active = networkFailureTab(
+    "tab-network-active",
+    "trace_network_active",
+    "surface_network_active_0123456789AB",
+    711,
+    8711,
+  );
+  const inactive = networkFailureTab(
+    "tab-network-ready",
+    "trace_network_ready",
+    "surface_network_ready_0123456789AB",
+    712,
+    8712,
+    "ready",
+  );
+  const records = [];
+  const fixture = networkFailureFixture([active, inactive], {
+    record(...args) { records.push(args); },
+    observe() {},
+  });
+  const base = {
+    id: 811,
+    method: "GET",
+    resourceType: "xhr",
+    error: "net::ERR_FAILED",
+  };
+
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    ...base,
+    url: "https://example.com/backend-api/conversation",
+    webContentsId: 711,
+  }), false);
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    ...base,
+    url: "https://chatgpt.com/backend-api/conversation",
+    webContentsId: 999,
+  }), false);
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    ...base,
+    url: "https://chatgpt.com/backend-api/conversation",
+    webContentsId: 712,
+  }), false);
+  assert.equal(records.length, 0);
+});
+
+test("network URL metadata is deterministic and excludes path, query, fragment, and subdomain text", () => {
+  const first = privacySafeNetworkRequestIdentity(
+    "https://private-subdomain.openai.com/v1/private-path?token=first-secret#first-fragment",
+  );
+  const second = privacySafeNetworkRequestIdentity(
+    "https://private-subdomain.openai.com/v1/private-path?token=second-secret#second-fragment",
+  );
+
+  assert.deepEqual(first, second);
+  assert.deepEqual(Object.keys(first).sort(), ["originClassification", "urlPathHash"]);
+  assert.equal(first.originClassification, "openai-subdomain");
+  assert.match(first.urlPathHash, /^[a-f0-9]{32}$/);
+  assert.equal(privacySafeNetworkRequestIdentity("https://example.com/v1/private-path"), null);
+  assert.equal(privacySafeNetworkRequestIdentity("http://chatgpt.com/backend-api/conversation"), null);
+  assert.doesNotMatch(JSON.stringify(first), /private-subdomain|private-path|secret|fragment/);
+});
+
+test("network observation failures cannot affect BrowserHost request handling", async () => {
+  const tab = networkFailureTab(
+    "tab-network-observer-failure",
+    "trace_network_observer_failure",
+    "surface_network_observer_failure_012345",
+    721,
+    8721,
+  );
+  const fixture = networkFailureFixture([tab], {
+    updateSurface() { throw new Error("synthetic update failure"); },
+    record() { throw new Error("synthetic record failure"); },
+    observe() { return Promise.reject(new Error("synthetic screenshot failure")); },
+  });
+
+  assert.doesNotThrow(() => {
+    assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+      id: 821,
+      url: "https://chatgpt.com/backend-api/conversation",
+      method: "POST",
+      webContentsId: 721,
+      resourceType: "xhr",
+      error: "net::ERR_TIMED_OUT",
+    }), true);
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const installationFixture = {
+    view: { webContents: { session: { webRequest: {
+      onErrorOccurred() { throw new Error("synthetic listener failure"); },
+    } } } },
+  };
+  assert.doesNotThrow(() => {
+    assert.equal(
+      BrowserHost.prototype.bindChatGptNetworkFailureObservation.call(installationFixture),
+      false,
+    );
+  });
 });
 
 function createContents() {
