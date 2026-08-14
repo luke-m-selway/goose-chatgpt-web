@@ -1,9 +1,11 @@
 # ChatGPT-Web concurrency and Electron-liveness qualification
 
-Status: **implementation candidate**. Static/unit tests are passing at this checkpoint. An invalid
-parent/delegate attempt nevertheless produced useful two-way live evidence in which both slow CDP
-probes recovered and BrowserHost heartbeats continued. The committed deterministic three-surface
-proof and the separate natural parent → two async children proof remain **NOT RUN / pending**.
+Status: **implementation candidate**. Static/unit tests are passing at this checkpoint. The
+deterministic three-surface proof remains **NOT RUN / pending**. The natural parent → two async
+children proof has now run once, on 2026-08-13, and returned `NATURAL PARENT + 2: FAIL` (topology
+formed correctly; Child A's background task never persisted a result). See "Evidence already
+observed" below and the persistent `natural-analyze` tooling that reproduces this classification
+from persisted evidence alone.
 
 Independent review of PR #31 recorded these gates:
 
@@ -307,11 +309,10 @@ goose run \
   >"$natural_dir/parent.stdout.jsonl" \
   2>"$natural_dir/parent.stderr.log"
 
-bun run scripts/chatgpt-web-qualification.ts analyze \
+bun run scripts/chatgpt-web-qualification.ts natural-analyze \
   --baseline "$natural_dir/baseline.json" \
-  --json "$natural_dir/analysis.json" \
-  --report "$natural_dir/verdict.txt" \
-  --expected-traces 3
+  --json "$natural_dir/natural-analysis.json" \
+  --report "$natural_dir/natural-verdict.txt"
 ```
 
 The parent prompt requires both calls in one assistant tool-call message when the model/provider
@@ -327,41 +328,114 @@ parent must verify both IDs, do independent shell/read/reasoning work while both
 then `load` both IDs. Missing `async: true`, a synchronous result, or failure to obtain both IDs makes
 the attempt **INVALID**, not a BrowserHost-liveness failure.
 
-For a valid natural proof, retain and verify all of the following:
+### `natural-analyze`: what it reconstructs and verifies
 
-- exactly two persisted parent `delegate` calls;
-- `source` equals `chatgpt-web-concurrency-child-a` and
-  `chatgpt-web-concurrency-child-b`, once each;
+`natural-analyze` (implemented by `analyzeNaturalTopology`/`analyzeNaturalTopologyEvidence` in
+`src/qualification/chatgpt-web-qualification.ts`) runs the same trace/overlap/process/429 analyzer as
+`analyze`, then adds a Goose-session correlation layer reconstructed entirely from persisted
+`delegate`/`load`/`peek` tool exchanges — never from a run manifest, since natural runs have none.
+It identifies the parent as the one new Goose session that persisted `delegate` calls, resolves each
+child's task/session ID from the delegate response text (`Task <id> started in background`), and
+independently verifies:
+
+- exactly two persisted parent `delegate` calls, with `source` equal to
+  `chatgpt-web-concurrency-child-a` and `chatgpt-web-concurrency-child-b` once each;
 - persisted `async: true` on both calls;
-- two distinct returned child task/session IDs and the matching child sessions;
-- parent-owned shell/read/reasoning work persisted before either `load` call;
-- final persisted assistant messages ending in `child-a-ok`, `child-b-ok`, and
-  `natural-parent-ok` for the matching sessions;
-- exactly three ChatGPT-Web traces with at least 10,000 ms common overlap and Goose Native shell
-  evidence for every trace.
+- two distinct, resolvable child task/session IDs (a duplicate/replacement child is rejected);
+- both delegate calls precede the first `load`/`peek` call (delegate-A, delegate-B, parent Native
+  work, first load — in that order);
+- at least one parent Goose Native tool call persisted between the delegates and the first load;
+- each child's **own final persisted assistant message** — never a background-task registry's
+  self-reported `✓ Completed` status, which can wrap a network/stream-decode failure — ends in its
+  expected `child-a-ok`/`child-b-ok` marker;
+- the parent's own final persisted assistant message ends in `natural-parent-ok`;
+- the shared analyzer's trace count, ≥10,000 ms common three-way overlap, process stability, and
+  absence of 429/native-terminal evidence.
 
-The monitor now retains the safe persisted delegate `source`/`async` fields and final assistant text
-in `analysis.json`. It still does not independently bind every BrowserHost trace to a Goose session,
-prove returned task-ID identity, or score parent-work-before-load ordering. Those remain explicit
-natural-proof evidence requirements to verify from persisted Goose session/tool-result artifacts;
-the generic analyzer verdict alone must not be presented as recursive-topology proof.
+It reports a **verdict** — `PASS`, `INVALID_TOPOLOGY`, or `FAIL` — plus **component-level results**
+(`topologyFormation`, `parentNativeWorkBeforeLoad`, `threeWayOverlap`, `processStability`,
+`runtimeIntegrity`, `childCompletion`, `parentMarker`, `nativeLifecycleEvidence`) so a run can
+truthfully say things like "topology formation: PASS, three-way overlap: PASS, reliable child
+completion: FAIL" instead of collapsing everything into one generic FAIL. `INVALID_TOPOLOGY` is
+reserved for `topologyFormation` failures (omitted `async: true`, fewer/more than two delegates, a
+load before both children launched, a duplicate/replacement child); a topology that genuinely formed
+but whose children/parent failed is reported `FAIL`, never `INVALID_TOPOLOGY`.
+`nativeLifecycleEvidence` is informational only (`PASS`/`NOT_ESTABLISHED`, never gates the verdict):
+the current runtime generation does not reliably emit native lifecycle evidence on every trace (see
+the exact-revision preflight above), and that gap is reported explicitly rather than silently
+counted as passing.
 
-This final test qualifies the natural recursive topology only when the monitor evidence and every
-persisted-topology requirement above agree.
+For a valid natural proof, `natural-verdict.txt`/`natural-analysis.json` must show `verdict: PASS`
+with every gating component (`topologyFormation`, `parentNativeWorkBeforeLoad`, `threeWayOverlap`,
+`processStability`, `runtimeIntegrity`, `childCompletion`, `parentMarker`) at `PASS`. The generic
+`analyze` verdict alone must never be presented as recursive-topology proof.
+
+## Manual actor / passive-observer protocol
+
+This is the permanent procedure for a human-run natural proof, separate from the deterministic
+three-independent-session runner above (which launches its own `goose run` processes and needs no
+manual actor). The observer never starts Goose, never sends anything to ChatGPT-Web, never leases a
+BrowserHost surface, and never restarts anything — it only reads already-persisted evidence.
+
+1. Start the observer baseline (`bun run scripts/chatgpt-web-qualification.ts baseline ...`, as
+   above).
+2. Wait for `MONITOR READY` — the observer's confirmation that the baseline was captured and the
+   evidence boundary is clean (or an explicit note of why it is not).
+3. Luke manually starts a fresh, ordinary `goose run` ChatGPT-Web High parent session (not launched
+   by the observer or any script).
+4. Paste the committed strict natural-parent prompt (`qualification/chatgpt-web-natural-parent.md`)
+   into that session.
+5. The observer remains completely idle while the workload runs: no polling, no log tailing that
+   could be mistaken for interaction, no browser/CDP attachment.
+6. After the parent session terminates, run the committed `natural-analyze` command against the
+   baseline captured in step 1.
+7. Classify the **actual** topology that formed, not the requested one — `natural-analyze` derives
+   delegate/load ordering, marker evidence, and overlap entirely from persisted Goose and BrowserHost
+   evidence, so a run that omitted `async: true` or never obtained a task ID is `INVALID_TOPOLOGY`
+   regardless of what the prompt asked for.
 
 ## Evidence already observed
 
-The latest invalid attempt formed only parent + child A because the single persisted delegate call
-omitted `async: true`. The synchronous delegate later returned a stream-decode network error, and the
-parent correctly stopped before child B. It is not a failed three-way liveness proof.
-
-That invalid run did show useful two-way behavior:
+An earlier invalid attempt formed only parent + child A because the single persisted delegate call
+omitted `async: true`. The synchronous delegate returned a stream-decode network error, and the
+parent correctly stopped before child B. It is not a failed three-way liveness proof. That invalid
+run did show useful two-way behavior:
 
 - parent slow probe about 5.2 seconds → recovered about 6.6 seconds;
 - child A slow probe about 5.0 seconds → recovered about 5.3 seconds;
 - BrowserHost heartbeats continued;
 - no Electron `unresponsive`, renderer-gone, WebContents-destroyed, or runtime-crash evidence.
 
+On 2026-08-13, following the manual actor / passive-observer protocol above, a natural run **did**
+form the full three-way topology and was classified `NATURAL PARENT + 2: FAIL` (not
+`INVALID_TOPOLOGY`) by `natural-analyze`:
+
+- parent session `20260813_45` persisted two `delegate` calls, both `async: true`, sources
+  `chatgpt-web-concurrency-child-a`/`-b`, both before the first `load` call, with three Goose Native
+  shell calls in between (`topologyFormation`, `parentNativeWorkBeforeLoad`: **PASS**);
+- three distinct BrowserHost traces with **593,129 ms** measured common three-way overlap
+  (`threeWayOverlap`: **PASS**); daemon/BrowserHost/tunnel/broker PIDs were unchanged throughout, and
+  no 429/rate-limit or native-terminal evidence was observed (`processStability`,
+  `runtimeIntegrity`: **PASS**);
+- Child A (session `20260813_46`) persisted **zero** assistant/tool messages — its background task's
+  own registry entry reported `✓ Completed` but with output `Network error: Stream decode error:
+  error decoding response body`, and its BrowserHost tab never reached `tab_completed`. No
+  `child-a-ok` was ever persisted (`childCompletion`: **FAIL**);
+- Child B (session `20260813_47`) persisted Goose Native shell calls and a final assistant message
+  ending in `child-b-ok` (contributes **PASS** toward `childCompletion`, which still fails overall
+  because both children are required);
+- the parent's own final persisted message explicitly declined to emit `natural-parent-ok`, stating
+  that Child A's result could not be collected (`parentMarker`: **FAIL**);
+- no trace showed native active lifecycle evidence at all (`nativeLifecycleEvidence`:
+  **NOT_ESTABLISHED**) — the running BrowserHost/helper generation predated the current runtime's
+  lifecycle instrumentation; this is the same exact-revision gap the preflight section above exists
+  to close, not new evidence of a liveness regression.
+
+This run's characteristics are preserved as fixtures in
+`tests/chatgpt-web-natural-topology-qualification.test.ts`, including the "Child A stream-decodes to
+nothing, Child B succeeds" case, so future changes to the analyzer are checked against this exact
+observed shape.
+
 The candidate's static/unit coverage, previously qualified long-turn behavior, and earlier
-independent concurrency qualifications remain evidence inputs. Neither new live procedure above may
-be marked proven until its exact committed command is run and its artifacts are retained.
+independent concurrency qualifications remain evidence inputs. The deterministic three-surface proof
+may not be marked proven until its exact committed command is run and its artifacts are retained.

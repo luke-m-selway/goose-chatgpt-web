@@ -55,6 +55,8 @@ export interface QualificationBaseline {
   existingGooseSessionIds: string[];
   evidenceBoundaryClean: boolean;
   evidenceBoundaryNotes: string[];
+  evidenceBoundaryLiveTraceIds: string[];
+  evidenceBoundaryReapedTraceIds: string[];
 }
 
 export interface LifecycleTransition {
@@ -126,6 +128,16 @@ export interface GooseDelegateCallEvidence {
   createdAt: string | null;
 }
 
+export interface GooseToolExchange {
+  callId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  requestedAt: string | null;
+  respondedAt: string | null;
+  resultText: string | null;
+  isError: boolean;
+}
+
 export interface GooseSessionEvidence {
   id: string;
   name: string;
@@ -138,6 +150,13 @@ export interface GooseSessionEvidence {
   model: string | null;
   toolCalls: GooseToolCallEvidence[];
   delegateCalls: GooseDelegateCallEvidence[];
+  /**
+   * Every persisted tool call in the session, paired request+response, in call order. Unlike
+   * `toolCalls`/`delegateCalls` (assistant-side requests only), this also carries the persisted
+   * toolResponse text/error so callers can distinguish a genuinely completed background task from
+   * one whose registry entry says "completed" but whose output is an error payload.
+   */
+  toolExchanges: GooseToolExchange[];
   finalAssistantMessage: {
     createdAt: string | null;
     text: string;
@@ -362,8 +381,19 @@ function readGooseSessionIds(databasePath: string): string[] {
   }
 }
 
-function activeTraceIdsBeforeBoundary(launcherLogPath: string): string[] {
+export interface TraceBoundaryStatus {
+  active: string[];
+  reaped: string[];
+}
+
+/**
+ * `browser.orphan_turn_reaped` is a terminal event for a trace whose surface bootstrap timed out.
+ * A trace last seen via that event is stale evidence, not live contention, even though it never
+ * emitted `browser.turn_ended` on its own owning helper generation.
+ */
+export function traceIdsBeforeBoundary(launcherLogPath: string): TraceBoundaryStatus {
   const active = new Set<string>();
+  const reaped = new Set<string>();
   for (const path of [`${launcherLogPath}.1`, launcherLogPath]) {
     if (!existsSync(path)) continue;
     for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
@@ -375,11 +405,21 @@ function activeTraceIdsBeforeBoundary(launcherLogPath: string): string[] {
       const detail = (record as { detail?: { traceId?: unknown } }).detail;
       const traceId = typeof detail?.traceId === "string" ? detail.traceId : null;
       if (!traceId) continue;
-      if (["browser.turn_started", "browser.turn_heartbeat"].includes(String(event))) active.add(traceId);
-      if (event === "browser.turn_ended") active.delete(traceId);
+      if (["browser.turn_started", "browser.turn_heartbeat"].includes(String(event))) {
+        active.add(traceId);
+        reaped.delete(traceId);
+      }
+      if (event === "browser.turn_ended") {
+        active.delete(traceId);
+        reaped.delete(traceId);
+      }
+      if (event === "browser.orphan_turn_reaped") {
+        active.delete(traceId);
+        reaped.add(traceId);
+      }
     }
   }
-  return [...active].sort();
+  return { active: [...active].sort(), reaped: [...reaped].sort() };
 }
 
 export function captureQualificationBaseline(options: {
@@ -406,8 +446,13 @@ export function captureQualificationBaseline(options: {
   const daemonPid = launchctlPid(DAEMON_LABEL);
   const launcherLogPath = resolve(options.launcherLogPath ?? defaultLauncherLogPath());
   const gooseSessionsDatabase = resolve(options.gooseSessionsDatabase ?? defaultGooseSessionsDatabase());
-  const activeTraces = activeTraceIdsBeforeBoundary(launcherLogPath);
-  const notes = activeTraces.map(traceId => `BrowserHost trace ${traceId} was active at baseline`);
+  const boundaryTraces = traceIdsBeforeBoundary(launcherLogPath);
+  const notes = [
+    ...boundaryTraces.active.map(traceId => `BrowserHost trace ${traceId} was active (live contention) at baseline`),
+    ...boundaryTraces.reaped.map(traceId => (
+      `BrowserHost trace ${traceId} was stale/orphan-reaped before baseline (not live contention)`
+    )),
+  ];
   const logPaths = {
     daemonStdout: join(runtimeHome, "logs", "daemon.stdout.log"),
     daemonStderr: join(runtimeHome, "logs", "daemon.stderr.log"),
@@ -440,8 +485,10 @@ export function captureQualificationBaseline(options: {
     logs: Object.fromEntries(Object.entries(logPaths).map(([key, path]) => [key, filePosition(path)])),
     gooseSessionsDatabase,
     existingGooseSessionIds: readGooseSessionIds(gooseSessionsDatabase),
-    evidenceBoundaryClean: activeTraces.length === 0,
+    evidenceBoundaryClean: boundaryTraces.active.length === 0,
     evidenceBoundaryNotes: notes,
+    evidenceBoundaryLiveTraceIds: boundaryTraces.active,
+    evidenceBoundaryReapedTraceIds: boundaryTraces.reaped,
   };
 }
 
@@ -814,6 +861,64 @@ export function finalAssistantHasTerminalMarker(
   return text.trimEnd().split(/\r?\n/).at(-1)?.trim() === expectedMarker;
 }
 
+interface RawSessionMessage {
+  role: string;
+  content_json: string;
+  created_at: string | null;
+}
+
+function toolExchangesFromMessages(messages: RawSessionMessage[]): GooseToolExchange[] {
+  const order: string[] = [];
+  const requests = new Map<string, { tool: string; arguments: Record<string, unknown>; requestedAt: string | null }>();
+  const responses = new Map<string, { respondedAt: string | null; resultText: string | null; isError: boolean }>();
+  for (const message of messages) {
+    let content: unknown;
+    try { content = JSON.parse(message.content_json); } catch { continue; }
+    if (!Array.isArray(content)) continue;
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const block = item as Record<string, unknown>;
+      const callId = typeof block.id === "string" ? block.id : null;
+      if (!callId) continue;
+      if (block.type === "toolRequest" && message.role === "assistant") {
+        const value = (block.toolCall as { value?: { name?: unknown; arguments?: unknown } } | undefined)?.value;
+        if (typeof value?.name !== "string") continue;
+        const args = value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
+          ? value.arguments as Record<string, unknown>
+          : {};
+        if (!requests.has(callId)) order.push(callId);
+        requests.set(callId, { tool: value.name, arguments: args, requestedAt: message.created_at });
+      } else if (block.type === "toolResponse" && message.role === "user") {
+        const resultValue = (block.toolResult as { value?: { content?: unknown; isError?: unknown } } | undefined)?.value;
+        const content2 = Array.isArray(resultValue?.content) ? resultValue!.content as unknown[] : [];
+        const text = content2.flatMap(part => (
+          part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
+            ? [(part as { text: string }).text]
+            : []
+        )).join("\n");
+        responses.set(callId, {
+          respondedAt: message.created_at,
+          resultText: text || null,
+          isError: resultValue?.isError === true,
+        });
+      }
+    }
+  }
+  return order.map(callId => {
+    const request = requests.get(callId)!;
+    const response = responses.get(callId);
+    return {
+      callId,
+      tool: request.tool,
+      arguments: request.arguments,
+      requestedAt: request.requestedAt,
+      respondedAt: response?.respondedAt ?? null,
+      resultText: response?.resultText ?? null,
+      isError: response?.isError ?? false,
+    };
+  });
+}
+
 export function readNewGooseSessions(baseline: QualificationBaseline): GooseSessionEvidence[] {
   const path = baseline.gooseSessionsDatabase;
   if (!existsSync(path)) return [];
@@ -827,15 +932,16 @@ export function readNewGooseSessions(baseline: QualificationBaseline): GooseSess
       ORDER BY created_at, id
     `).all() as Array<Record<string, unknown>>;
     const messageQuery = database.query(`
-      SELECT content_json, datetime(created_timestamp, 'unixepoch') AS created_at
+      SELECT role, content_json, datetime(created_timestamp, 'unixepoch') AS created_at
       FROM messages
-      WHERE session_id = ? AND role = 'assistant'
+      WHERE session_id = ?
       ORDER BY created_timestamp, id
     `);
     return sessions.filter(session => typeof session.id === "string" && !existing.has(session.id)).map(session => {
       const id = String(session.id);
-      const messages = messageQuery.all(id) as Array<{ content_json: string; created_at: string | null }>;
-      const finalAssistant = messages.at(-1);
+      const messages = messageQuery.all(id) as RawSessionMessage[];
+      const assistantMessages = messages.filter(message => message.role === "assistant");
+      const finalAssistant = assistantMessages.at(-1);
       const finalAssistantText = finalAssistant
         ? assistantTextFromContent(finalAssistant.content_json)
         : null;
@@ -849,8 +955,9 @@ export function readNewGooseSessions(baseline: QualificationBaseline): GooseSess
         updatedAt: String(session.updated_at ?? ""),
         provider: scalarString(session.provider_name),
         model: parseModel(session.model_config_json),
-        toolCalls: messages.flatMap(message => toolCallsFromContent(message.content_json, message.created_at)),
-        delegateCalls: messages.flatMap(message => delegateCallsFromContent(message.content_json, message.created_at)),
+        toolCalls: assistantMessages.flatMap(message => toolCallsFromContent(message.content_json, message.created_at)),
+        delegateCalls: assistantMessages.flatMap(message => delegateCallsFromContent(message.content_json, message.created_at)),
+        toolExchanges: toolExchangesFromMessages(messages),
         finalAssistantMessage: finalAssistantText === null ? null : {
           createdAt: finalAssistant?.created_at ?? null,
           text: finalAssistantText,
@@ -1105,4 +1212,415 @@ export function assertOutputOutsideRepository(repositoryRoot: string, outputPath
   if (dirname(output) === resolve(repositoryRoot)) {
     throw new Error(`Qualification output must stay outside the repository: ${output}`);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Natural recursive-topology analysis: parent + two async delegate children.
+//
+// This reuses `analyzeQualification` in full for BrowserHost trace/overlap/process/429 evidence.
+// It adds a Goose-session-level correlation layer on top, reconstructed entirely from persisted
+// `delegate`/`load`/`peek` tool exchanges, to answer questions the generic analyzer intentionally
+// does not: which session is the parent, which two children it actually launched, whether both
+// were launched async before either was loaded, and whether each participant's own final
+// persisted assistant message carries its required marker (never trusting a background-task
+// registry's self-reported "Completed" status, which can wrap a network/stream-decode failure).
+// ---------------------------------------------------------------------------------------------
+
+export type ComponentVerdict = "PASS" | "FAIL" | "NOT_ESTABLISHED";
+export type NaturalTopologyVerdict = "PASS" | "INVALID_TOPOLOGY" | "FAIL";
+
+const DELEGATE_TOOL_PATTERN = /(?:^|__)delegate$/;
+const LOAD_TOOL_PATTERN = /(?:^|__)load$/;
+const SHELL_TOOL_PATTERN = /(?:^|__)shell$/;
+const NATURAL_PARENT_MARKER = "natural-parent-ok";
+const BACKGROUND_ERROR_PATTERN = /(Network error[^\n]*|Stream decode error[^\n]*|error decoding response body[^\n]*)/i;
+
+export interface NaturalDelegateRecord {
+  callId: string;
+  source: string | null;
+  async: boolean | null;
+  requestedAt: string | null;
+  respondedAt: string | null;
+  childSessionId: string | null;
+  responseText: string | null;
+}
+
+export type NaturalLoadOutcome = "completed" | "running" | "timed-out" | "not-found" | "error" | "unknown";
+
+export interface NaturalLoadRecord {
+  callId: string;
+  peek: boolean;
+  requestedSource: string | null;
+  requestedAt: string | null;
+  respondedAt: string | null;
+  responseText: string | null;
+  outcome: NaturalLoadOutcome;
+}
+
+export interface NaturalChildEvidence {
+  expectedRole: "child-a" | "child-b" | "unknown";
+  source: string | null;
+  sessionId: string | null;
+  expectedMarker: string | null;
+  markerObserved: boolean;
+  hasNativeShellEvidence: boolean;
+  finalAssistantText: string | null;
+  lastLoadOutcome: NaturalLoadOutcome | null;
+  backgroundErrorText: string | null;
+}
+
+export interface NaturalTopologyComponents {
+  topologyFormation: ComponentVerdict;
+  parentNativeWorkBeforeLoad: ComponentVerdict;
+  threeWayOverlap: ComponentVerdict;
+  processStability: ComponentVerdict;
+  runtimeIntegrity: ComponentVerdict;
+  childCompletion: ComponentVerdict;
+  parentMarker: ComponentVerdict;
+  nativeLifecycleEvidence: ComponentVerdict;
+}
+
+export interface NaturalTopologyAnalysis {
+  version: number;
+  kind: "chatgpt-web-natural-topology-analysis";
+  analyzedAtUtc: string;
+  analyzedAtLocal: string;
+  baselineCapturedAt: string;
+  verdict: NaturalTopologyVerdict;
+  components: NaturalTopologyComponents;
+  parentSessionId: string | null;
+  delegateCalls: NaturalDelegateRecord[];
+  loadCalls: NaturalLoadRecord[];
+  bothDelegatesBeforeFirstLoad: boolean;
+  parentNativeToolCallsBeforeFirstLoad: number;
+  children: NaturalChildEvidence[];
+  parentMarkerObserved: boolean;
+  parentFinalAssistantText: string | null;
+  qualification: QualificationAnalysis;
+  reasons: string[];
+}
+
+/** `chatgpt-web-concurrency-child-a` -> `child-a-ok`; unknown source shapes resolve to `null`. */
+export function expectedMarkerForChildSource(source: string | null): string | null {
+  const match = /^chatgpt-web-concurrency-child-([a-z0-9]+)$/.exec(source ?? "");
+  return match ? `child-${match[1]}-ok` : null;
+}
+
+function expectedRoleForChildSource(source: string | null): NaturalChildEvidence["expectedRole"] {
+  if (source === "chatgpt-web-concurrency-child-a") return "child-a";
+  if (source === "chatgpt-web-concurrency-child-b") return "child-b";
+  return "unknown";
+}
+
+function childSessionIdFromDelegateResponse(text: string | null): string | null {
+  if (!text) return null;
+  return /Task\s+"?([A-Za-z0-9_.-]+)"?\s+started in background/.exec(text)?.[1] ?? null;
+}
+
+function loadOutcomeFromResponse(text: string | null, isError: boolean): NaturalLoadOutcome {
+  if (!text) return isError ? "error" : "unknown";
+  if (/not found/i.test(text)) return "not-found";
+  if (/is still running after waiting/i.test(text)) return "timed-out";
+  if (/✓\s*Completed/i.test(text)) return "completed";
+  if (/⏳\s*Running/i.test(text)) return "running";
+  if (isError) return "error";
+  return "unknown";
+}
+
+function backgroundErrorTextFrom(records: NaturalLoadRecord[]): string | null {
+  for (const record of records) {
+    const match = record.responseText ? BACKGROUND_ERROR_PATTERN.exec(record.responseText) : null;
+    if (match) return match[0];
+  }
+  return null;
+}
+
+function delegateRecordsFromSession(session: GooseSessionEvidence): NaturalDelegateRecord[] {
+  return session.toolExchanges
+    .filter(exchange => DELEGATE_TOOL_PATTERN.test(exchange.tool))
+    .map(exchange => ({
+      callId: exchange.callId,
+      source: typeof exchange.arguments.source === "string" ? exchange.arguments.source : null,
+      async: typeof exchange.arguments.async === "boolean" ? exchange.arguments.async : null,
+      requestedAt: exchange.requestedAt,
+      respondedAt: exchange.respondedAt,
+      childSessionId: childSessionIdFromDelegateResponse(exchange.resultText),
+      responseText: exchange.resultText,
+    }));
+}
+
+function loadRecordsFromSession(session: GooseSessionEvidence): NaturalLoadRecord[] {
+  return session.toolExchanges
+    .filter(exchange => LOAD_TOOL_PATTERN.test(exchange.tool))
+    .map(exchange => ({
+      callId: exchange.callId,
+      peek: exchange.arguments.peek === true,
+      requestedSource: typeof exchange.arguments.source === "string" ? exchange.arguments.source : null,
+      requestedAt: exchange.requestedAt,
+      respondedAt: exchange.respondedAt,
+      responseText: exchange.resultText,
+      outcome: loadOutcomeFromResponse(exchange.resultText, exchange.isError),
+    }));
+}
+
+function chronological(at: string | null): number {
+  const parsed = at === null ? Number.NaN : Date.parse(at);
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Identify the parent session as the single new Goose session that persisted delegate calls.
+ * Natural runs have no run manifest (unlike the deterministic three-surface runner), so the
+ * parent can only be recovered from persisted evidence, not asserted from launch-time bookkeeping.
+ */
+function findParentSession(sessions: GooseSessionEvidence[]): GooseSessionEvidence | null {
+  const candidates = sessions.filter(session => session.delegateCalls.length > 0);
+  if (candidates.length === 0) return null;
+  return candidates.reduce((earliest, candidate) => (
+    chronological(candidate.createdAt) < chronological(earliest.createdAt) ? candidate : earliest
+  ));
+}
+
+export function buildNaturalTopologyAnalysis(
+  baseline: QualificationBaseline,
+  qualification: QualificationAnalysis,
+  now: Date,
+): NaturalTopologyAnalysis {
+  const reasons: string[] = [];
+  const sessionsById = new Map(qualification.gooseSessions.map(session => [session.id, session]));
+  const parentSession = findParentSession(qualification.gooseSessions);
+  if (!parentSession) {
+    reasons.push("No new Goose session with a persisted delegate call was found");
+  }
+
+  const delegateCalls = parentSession ? delegateRecordsFromSession(parentSession) : [];
+  const loadCalls = parentSession ? loadRecordsFromSession(parentSession) : [];
+  const firstLoadAt = loadCalls.length > 0
+    ? Math.min(...loadCalls.map(record => chronological(record.requestedAt)))
+    : null;
+
+  if (delegateCalls.length !== 2) {
+    reasons.push(`Expected exactly 2 persisted delegate calls, observed ${delegateCalls.length}`);
+  }
+  for (const delegate of delegateCalls) {
+    if (delegate.async !== true) {
+      reasons.push(`Delegate call ${delegate.callId} (source=${delegate.source ?? "unknown"}) did not persist async:true`);
+    }
+    if (!delegate.childSessionId) {
+      reasons.push(`Delegate call ${delegate.callId} (source=${delegate.source ?? "unknown"}) did not return a resolvable child task/session id`);
+    }
+  }
+  const sources = delegateCalls.map(delegate => delegate.source);
+  if (sources.some(source => !source) || new Set(sources).size !== sources.length) {
+    reasons.push("Delegate calls did not use two distinct, resolvable sources");
+  }
+  const childSessionIds = delegateCalls.map(delegate => delegate.childSessionId).filter((id): id is string => id !== null);
+  if (childSessionIds.length === 2 && new Set(childSessionIds).size !== 2) {
+    reasons.push("Both delegate calls returned the same child task/session id (duplicate/replacement child)");
+  }
+  const bothDelegatesBeforeFirstLoad = delegateCalls.length === 2 && (
+    firstLoadAt === null || delegateCalls.every(delegate => chronological(delegate.requestedAt) < firstLoadAt)
+  );
+  if (delegateCalls.length === 2 && !bothDelegatesBeforeFirstLoad) {
+    reasons.push("Parent issued a load/peek call before both delegate calls were made");
+  }
+
+  const topologyFormation: ComponentVerdict = parentSession && reasons.length === 0 ? "PASS" : "FAIL";
+
+  const shellCalls = parentSession
+    ? parentSession.toolExchanges.filter(exchange => SHELL_TOOL_PATTERN.test(exchange.tool))
+    : [];
+  const parentNativeToolCallsBeforeFirstLoad = firstLoadAt === null
+    ? shellCalls.length
+    : shellCalls.filter(exchange => chronological(exchange.requestedAt) < firstLoadAt).length;
+  const parentNativeWorkBeforeLoad: ComponentVerdict = parentNativeToolCallsBeforeFirstLoad > 0 ? "PASS" : "FAIL";
+  if (parentNativeWorkBeforeLoad === "FAIL" && topologyFormation === "PASS") {
+    reasons.push("Parent has no persisted Goose Native tool call before either load/peek call");
+  }
+
+  const children: NaturalChildEvidence[] = delegateCalls.map(delegate => {
+    const childSession = delegate.childSessionId ? sessionsById.get(delegate.childSessionId) : undefined;
+    const expectedMarker = expectedMarkerForChildSource(delegate.source);
+    const childLoadRecords = loadCalls.filter(record => record.requestedSource === delegate.childSessionId);
+    return {
+      expectedRole: expectedRoleForChildSource(delegate.source),
+      source: delegate.source,
+      sessionId: delegate.childSessionId,
+      expectedMarker,
+      markerObserved: expectedMarker !== null && finalAssistantHasTerminalMarker(childSession, expectedMarker),
+      hasNativeShellEvidence: childSession?.toolCalls.some(tool => tool.name === "shell") ?? false,
+      finalAssistantText: childSession?.finalAssistantMessage?.text ?? null,
+      lastLoadOutcome: childLoadRecords.at(-1)?.outcome ?? null,
+      backgroundErrorText: backgroundErrorTextFrom(childLoadRecords),
+    };
+  });
+  if (topologyFormation === "PASS") {
+    for (const child of children) {
+      if (!child.markerObserved) {
+        reasons.push(
+          `${child.expectedRole} (source=${child.source ?? "unknown"}, session=${child.sessionId ?? "unresolved"})`
+          + ` did not persist its expected marker '${child.expectedMarker ?? "unknown"}'`
+          + (child.backgroundErrorText ? ` (background error: ${child.backgroundErrorText})` : ""),
+        );
+      }
+    }
+  }
+  const childCompletion: ComponentVerdict = topologyFormation !== "PASS"
+    ? "FAIL"
+    : children.length === 2 && children.every(child => child.markerObserved) ? "PASS" : "FAIL";
+
+  const parentMarkerObserved = parentSession !== null
+    && finalAssistantHasTerminalMarker(parentSession, NATURAL_PARENT_MARKER);
+  const parentMarker: ComponentVerdict = parentMarkerObserved ? "PASS" : "FAIL";
+  if (!parentMarkerObserved && parentSession) {
+    reasons.push(`Parent session ${parentSession.id} final persisted message did not end in '${NATURAL_PARENT_MARKER}'`);
+  }
+
+  const threeWayOverlap: ComponentVerdict = qualification.traces.length === qualification.expectedTraceCount
+    && qualification.commonOverlap.durationMs >= qualification.minimumCommonOverlapMs
+    ? "PASS"
+    : "FAIL";
+  if (threeWayOverlap === "FAIL") {
+    reasons.push(
+      `Three-way overlap requirement not met: ${qualification.traces.length}/${qualification.expectedTraceCount} traces,`
+      + ` ${qualification.commonOverlap.durationMs}ms common overlap (required ${qualification.minimumCommonOverlapMs}ms)`,
+    );
+  }
+
+  const trackedProcessChanges = qualification.processChanges.filter(change => (
+    change.kind !== "unchanged"
+    && !(change.component === "browserHelperPids" && change.kind === "started")
+  ));
+  const processStability: ComponentVerdict = trackedProcessChanges.length === 0 ? "PASS" : "FAIL";
+  if (processStability === "FAIL") {
+    for (const change of trackedProcessChanges) {
+      reasons.push(`${change.component} ${change.kind} during the run (before=${JSON.stringify(change.before)}, after=${JSON.stringify(change.after)})`);
+    }
+  }
+
+  const hasTerminalNativeEvidence = qualification.traces.some(trace => (
+    trace.lifecycle.some(item => item.status === "gone" || item.status === "destroyed")
+    || trace.controlLiveness.some(item => (
+      item.kind === "native-gone" || item.kind === "native-destroyed" || item.kind === "indeterminate-terminal"
+    ))
+  ));
+  const runtimeIntegrity: ComponentVerdict = qualification.rateLimits.length === 0 && !hasTerminalNativeEvidence
+    ? "PASS"
+    : "FAIL";
+  if (qualification.rateLimits.length > 0) reasons.push(`Observed ${qualification.rateLimits.length} rate-limit/429 log event(s)`);
+  if (hasTerminalNativeEvidence) reasons.push("Observed deterministic native-terminal or indeterminate-terminal evidence");
+
+  const nativeLifecycleEvidence: ComponentVerdict = qualification.traces.length > 0
+    && qualification.traces.every(trace => trace.lifecycle.some(item => item.status === "active"))
+    ? "PASS"
+    : "NOT_ESTABLISHED";
+
+  const verdict: NaturalTopologyVerdict = topologyFormation !== "PASS"
+    ? "INVALID_TOPOLOGY"
+    : [parentNativeWorkBeforeLoad, threeWayOverlap, processStability, runtimeIntegrity, childCompletion, parentMarker]
+        .every(component => component === "PASS")
+      ? "PASS"
+      : "FAIL";
+
+  return {
+    version: CHATGPT_WEB_QUALIFICATION_VERSION,
+    kind: "chatgpt-web-natural-topology-analysis",
+    analyzedAtUtc: now.toISOString(),
+    analyzedAtLocal: formatLocalIso(now),
+    baselineCapturedAt: baseline.capturedAtUtc,
+    verdict,
+    components: {
+      topologyFormation,
+      parentNativeWorkBeforeLoad,
+      threeWayOverlap,
+      processStability,
+      runtimeIntegrity,
+      childCompletion,
+      parentMarker,
+      nativeLifecycleEvidence,
+    },
+    parentSessionId: parentSession?.id ?? null,
+    delegateCalls,
+    loadCalls,
+    bothDelegatesBeforeFirstLoad,
+    parentNativeToolCallsBeforeFirstLoad,
+    children,
+    parentMarkerObserved,
+    parentFinalAssistantText: parentSession?.finalAssistantMessage?.text ?? null,
+    qualification,
+    reasons,
+  };
+}
+
+export function analyzeNaturalTopologyEvidence(options: {
+  baseline: QualificationBaseline;
+  logDeltas: Record<string, LogDelta>;
+  currentProcesses: ProcessSnapshot;
+  gooseSessions?: GooseSessionEvidence[];
+  expectedTraceCount?: number;
+  minimumCommonOverlapMs?: number;
+  now?: Date;
+}): NaturalTopologyAnalysis {
+  const now = options.now ?? new Date();
+  const qualification = analyzeEvidence({
+    baseline: options.baseline,
+    logDeltas: options.logDeltas,
+    currentProcesses: options.currentProcesses,
+    gooseSessions: options.gooseSessions,
+    expectedTraceCount: options.expectedTraceCount ?? DEFAULT_EXPECTED_TRACE_COUNT,
+    minimumCommonOverlapMs: options.minimumCommonOverlapMs,
+    now,
+  });
+  return buildNaturalTopologyAnalysis(options.baseline, qualification, now);
+}
+
+export function analyzeNaturalTopology(options: {
+  baseline: QualificationBaseline;
+  expectedTraceCount?: number;
+  minimumCommonOverlapMs?: number;
+  now?: Date;
+}): NaturalTopologyAnalysis {
+  const logDeltas = Object.fromEntries(
+    Object.entries(options.baseline.logs).map(([name, position]) => [name, readLogDelta(position)]),
+  );
+  return analyzeNaturalTopologyEvidence({
+    baseline: options.baseline,
+    logDeltas,
+    currentProcesses: currentProcesses(options.baseline),
+    gooseSessions: readNewGooseSessions(options.baseline),
+    expectedTraceCount: options.expectedTraceCount,
+    minimumCommonOverlapMs: options.minimumCommonOverlapMs,
+    now: options.now,
+  });
+}
+
+export function renderNaturalTopologyVerdict(analysis: NaturalTopologyAnalysis): string {
+  const lines = [
+    `NATURAL PARENT + 2: ${analysis.verdict}`,
+    `Parent session: ${analysis.parentSessionId ?? "unresolved"}`,
+    `Delegate calls: ${analysis.delegateCalls.length} `
+      + `(${analysis.delegateCalls.map(delegate => (
+        `${delegate.source ?? "unknown"}:async=${delegate.async ?? "unknown"}:child=${delegate.childSessionId ?? "unresolved"}`
+      )).join(", ") || "none"})`,
+    `Both delegates before first load: ${analysis.bothDelegatesBeforeFirstLoad}`,
+    `Parent Native tool calls before first load: ${analysis.parentNativeToolCallsBeforeFirstLoad}`,
+    `Three-way overlap: ${analysis.qualification.commonOverlap.durationMs}ms`
+      + ` (required ${analysis.qualification.minimumCommonOverlapMs}ms, traces `
+      + `${analysis.qualification.traces.length}/${analysis.qualification.expectedTraceCount})`,
+    "Components:",
+    ...Object.entries(analysis.components).map(([name, value]) => `  - ${name}: ${value}`),
+    "Children:",
+    ...analysis.children.map(child => (
+      `  - ${child.expectedRole} source=${child.source ?? "unknown"} session=${child.sessionId ?? "unresolved"}`
+      + ` marker=${child.markerObserved ? "observed" : "missing"}(${child.expectedMarker ?? "unknown"})`
+      + ` shellEvidence=${child.hasNativeShellEvidence} lastLoadOutcome=${child.lastLoadOutcome ?? "none"}`
+      + (child.backgroundErrorText ? ` backgroundError="${child.backgroundErrorText}"` : "")
+    )),
+    `Parent marker (${NATURAL_PARENT_MARKER}): ${analysis.parentMarkerObserved ? "observed" : "missing"}`,
+  ];
+  if (analysis.reasons.length > 0) {
+    lines.push("Reasons:");
+    for (const reason of analysis.reasons) lines.push(`- ${reason}`);
+  }
+  return `${lines.join("\n")}\n`;
 }

@@ -49,6 +49,8 @@ const baseline: QualificationBaseline = {
   existingGooseSessionIds: ["old"],
   evidenceBoundaryClean: true,
   evidenceBoundaryNotes: [],
+  evidenceBoundaryLiveTraceIds: [],
+  evidenceBoundaryReapedTraceIds: [],
 };
 
 function launcherRecord(at: string, event: string, detail: Record<string, unknown>): string {
@@ -157,6 +159,7 @@ const gooseSessions: GooseSessionEvidence[] = traceSpecs.map((spec, index) => ({
   model: index === 0 ? "chatgpt-web/high" : "chatgpt-web/medium",
   toolCalls: [{ name: "shell", createdAt: at(spec.start + 5) }],
   delegateCalls: [],
+  toolExchanges: [],
   finalAssistantMessage: {
     createdAt: at(spec.end),
     text: `qualification complete\n${index === 0 ? "high-session-ok" : `child-${index === 1 ? "a" : "b"}-ok`}`,
@@ -572,6 +575,7 @@ test("new Goose sessions preserve provider, model, parent, and persisted tool-ca
         async: true,
         createdAt: "2026-08-13 18:01:08",
       }],
+      toolExchanges: [],
       finalAssistantMessage: {
         createdAt: "2026-08-13 18:01:10",
         text: "complete\nchild-a-ok",
