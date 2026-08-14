@@ -436,6 +436,21 @@ This run's characteristics are preserved as fixtures in
 nothing, Child B succeeds" case, so future changes to the analyzer are checked against this exact
 observed shape.
 
+On 2026-08-14, run `natural-20260814-111148` again formed the valid parent plus two async-child
+topology and produced three BrowserHost traces with **89,239 ms** of common three-way overlap.
+Process stability, runtime integrity, and native lifecycle evidence passed, but both children ended
+with `ChatGPT browser stage timed out: send`. The independent turn broker proved that both submitted
+turns nevertheless reached real ChatGPT generation and local `shell` execution: Child A's broker
+call completed before its local send-stage timeout, while Child B's completed after its local
+timeout. This is a send-acknowledgement/control-path observation failure, not evidence that either
+prompt remained unsent. Diagnostic captures also began timing out only after the concurrent
+children were active, and their timeout wrapper does not cancel the underlying diagnostic action.
+
+The next qualification revision adds trace-scoped send press/poll timing, diagnostic outstanding
+and late-settlement evidence, and timed-out stage late-settlement evidence. It is observation-only:
+it changes no timeout, polling cadence, concurrency behavior, cancellation behavior, retry, or
+classification, and it does **not** claim a fix for the failed natural qualification.
+
 The candidate's static/unit coverage, previously qualified long-turn behavior, and earlier
 independent concurrency qualifications remain evidence inputs. The deterministic three-surface proof
 may not be marked proven until its exact committed command is run and its artifacts are retained.

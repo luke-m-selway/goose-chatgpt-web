@@ -11,17 +11,70 @@ export const CHATGPT_POST_SEND_CONTROL_INDETERMINATE_TIMEOUT_MS = 60_000;
 export const CHATGPT_BROWSER_CONTROL_CLEANUP_TIMEOUT_MS = 3_000;
 export const CHATGPT_BROWSER_DIAGNOSTIC_TIMEOUT_MS = 6_000;
 
+export interface BrowserControlTimeoutObservation {
+  onActionStart?: () => void;
+  onActionSettlement?: (event: {
+    outcome: "resolve" | "reject";
+    elapsedMs: number;
+    timedOut: boolean;
+  }) => void;
+  onTimeout?: (event: { elapsedMs: number; timeoutMs: number }) => void;
+}
+
+function reportBrowserControlTimeoutObservation(action: (() => void) | undefined): void {
+  if (!action) return;
+  try {
+    action();
+  } catch {
+    // Observation must never affect browser-control behavior or its verdict.
+  }
+}
+
 export async function withBrowserControlTimeout<T>(
   action: () => Promise<T>,
   timeoutMs: number,
   message: string,
+  observation?: BrowserControlTimeoutObservation,
 ): Promise<T> {
+  const startedAt = performance.now();
+  let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  reportBrowserControlTimeoutObservation(observation?.onActionStart);
+  let actionPromise: Promise<T>;
+  try {
+    actionPromise = action();
+  } catch (error) {
+    reportBrowserControlTimeoutObservation(() => observation?.onActionSettlement?.({
+      outcome: "reject",
+      elapsedMs: Math.round(performance.now() - startedAt),
+      timedOut,
+    }));
+    throw error;
+  }
+  void actionPromise.then(
+    () => reportBrowserControlTimeoutObservation(() => observation?.onActionSettlement?.({
+      outcome: "resolve",
+      elapsedMs: Math.round(performance.now() - startedAt),
+      timedOut,
+    })),
+    () => reportBrowserControlTimeoutObservation(() => observation?.onActionSettlement?.({
+      outcome: "reject",
+      elapsedMs: Math.round(performance.now() - startedAt),
+      timedOut,
+    })),
+  );
   try {
     return await Promise.race([
-      action(),
+      actionPromise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = setTimeout(() => {
+          timedOut = true;
+          reportBrowserControlTimeoutObservation(() => observation?.onTimeout?.({
+            elapsedMs: Math.round(performance.now() - startedAt),
+            timeoutMs,
+          }));
+          reject(new Error(message));
+        }, timeoutMs);
       }),
     ]);
   } finally {

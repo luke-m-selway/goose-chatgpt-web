@@ -16,6 +16,8 @@ test("completed prompts activate the scoped semantic send control", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('.getByTestId("send-button")');
   expect(workerSource).toContain('await sendButton.press("Enter")');
+  expect(workerSource).toContain('event: "send-press-start"');
+  expect(workerSource).toContain('event: "send-press-complete"');
   expect(workerSource).not.toContain('getByTestId("send-button").dispatchEvent("click")');
 });
 
@@ -1235,6 +1237,7 @@ test("terminal model errors are scoped to the new assistant turn instead of glob
 test("submission acceptance stops when its stage is aborted", async () => {
   const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
     waitForSubmissionAccepted(
+      traceId: string,
       page: Page,
       userTurns: unknown,
       responseTurns: unknown,
@@ -1250,6 +1253,7 @@ test("submission acceptance stops when its stage is aborted", async () => {
 
   await expect(waitForSubmissionAccepted.call(
     {},
+    "trace_aborted",
     {} as Page,
     {},
     {},
@@ -1264,6 +1268,7 @@ test("submission acceptance stops when its stage is aborted", async () => {
 test("a rate-limit dialog during the send/acknowledgement wait surfaces as an explicit 429, not a generic send timeout", async () => {
   const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
     waitForSubmissionAccepted(
+      traceId: string,
       page: Page,
       userTurns: unknown,
       responseTurns: unknown,
@@ -1295,6 +1300,7 @@ test("a rate-limit dialog during the send/acknowledgement wait surfaces as an ex
 
   await expect(waitForSubmissionAccepted.call(
     {},
+    "trace_rate_limit",
     page,
     neverVisible,
     neverVisible,
