@@ -4,13 +4,14 @@ These instructions apply to coding/automation agents working in this repository.
 
 ## Read current documentation first
 
-Before architecture, lifecycle, BrowserHost, tunnel, or Goose Control work, read:
+Before architecture, lifecycle, BrowserHost, tunnel, naming, or cross-project boundary work, read:
 
 1. `docs/README.md`
 2. `docs/architecture.md`
 3. `docs/runtime-lifecycle.md`
-4. `docs/roadmap.md`
-5. `docs/goose-control-plan.md` when the task concerns Goose Control
+4. `docs/naming.md`
+5. `docs/roadmap.md`
+6. `docs/goose-control-plan.md` only when historical/cross-project Goose Control context is relevant
 
 Current documentation outranks historical roadmap material and draft PR designs. Draft PR #25 and PR #26 are design inputs only after the documentation reconciliation on current `main`.
 
@@ -39,6 +40,14 @@ stop:  Responses daemon → BrowserHost → tunnel
 
 Use the canonical lifecycle entry point rather than reconstructing startup from lower-level service scripts.
 
+## Naming and legacy identifiers
+
+- Use the conceptual terminology in `docs/naming.md` for new documentation, prompts, reviews, and architecture descriptions.
+- Do not create new `codex*` project/runtime names unless referring to the actual Codex agent/specialist or an explicitly labelled legacy identifier.
+- Existing `CODEX_CHATGPT_WEB_*`, `io.github.codex-chatgpt-web.*`, `codex_tool_call`-style public actions, `scripts/start-goose-launcher.ts`, package/bin names, and runtime directories are migration debt, not permission to extend that naming pattern.
+- Do not rename persisted/service/public-ABI identifiers piecemeal. Their migration is a separate compatibility milestone with an inventory, old→new mapping, rollback/upgrade plan, and live proof.
+- A cosmetic rename must never create duplicate supervisors/runtime homes, strand browser authentication state, or silently invalidate the cached `Goose Native` connector schema.
+
 ## Proof boundaries that must not be rediscovered
 
 - BrowserHost readiness uses the descriptor-provided browser helper with Node/Electron Node semantics and `ELECTRON_RUN_AS_NODE=1`. Bun-direct Playwright/CDP is not authoritative readiness evidence.
@@ -49,13 +58,14 @@ Use the canonical lifecycle entry point rather than reconstructing startup from 
 
 ## Goose Control boundary
 
-- Goose Control addresses persisted Goose sessions through authenticated loopback `goose serve` ACP.
-- It must not address Electron windows, CDP targets, ChatGPT browser sessions, or BrowserHost process identity.
+- Goose Control is a provider-agnostic Planner-to-Goose control capability and active ownership/planning belongs in Day Shift, not in the ChatGPT-Web BrowserHost transport.
+- Historical Goose Control material in this repository may be consulted for ACP/security lessons, but it must not be treated as authority over the current Day Shift plan.
+- Goose Control must not address Electron windows, CDP targets, ChatGPT browser sessions, or BrowserHost process identity.
 - It is separate from Goose Native's per-turn `turn_token` capability.
-- Do not invent a second Goose session/execution API; use native ACP session operations.
-- The first implementation proof is the narrow synchronous GPT Action → REST/OpenAPI → ACP continuation path documented in `docs/goose-control-plan.md`; async jobs, cancellation, multi-target routing, fresh sessions, and Orchestrator are later work.
+- Do not invent a second Goose session/execution API; use native Goose session/ACP mechanisms.
 
 ## Delegation
 
-- Until BrowserHost concurrency is explicitly qualified for a task, avoid parallel ChatGPT-Web child fan-out under the managed browser host.
+- Until BrowserHost concurrency is explicitly live-qualified for the intended pattern, avoid parallel ChatGPT-Web child fan-out by default.
+- A dedicated concurrency qualification may deliberately test parent + ChatGPT-Web children with disposable bounded work.
 - When delegating to a non-ChatGPT/free worker, name the intended provider/model explicitly so it does not inherit ChatGPT-Web transport by accident.
