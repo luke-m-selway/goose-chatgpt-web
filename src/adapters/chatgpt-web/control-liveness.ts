@@ -17,6 +17,7 @@ export interface BrowserControlTimeoutObservation {
     outcome: "resolve" | "reject";
     elapsedMs: number;
     timedOut: boolean;
+    error?: unknown;
   }) => void;
   onTimeout?: (event: { elapsedMs: number; timeoutMs: number }) => void;
 }
@@ -57,10 +58,11 @@ export async function withBrowserControlTimeout<T>(
       elapsedMs: Math.round(performance.now() - startedAt),
       timedOut,
     })),
-    () => reportBrowserControlTimeoutObservation(() => observation?.onActionSettlement?.({
+    error => reportBrowserControlTimeoutObservation(() => observation?.onActionSettlement?.({
       outcome: "reject",
       elapsedMs: Math.round(performance.now() - startedAt),
       timedOut,
+      error,
     })),
   );
   try {

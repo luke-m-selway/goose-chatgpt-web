@@ -142,6 +142,40 @@ export const reportChatGptBrowserEvidence: ChatGptBrowserEvidenceReporter = evid
   }
 };
 
+export function boundedBrowserControlErrorEvidence(error: unknown): {
+  errorClassification: string;
+  errorReason: string;
+} {
+  const classification = error instanceof Error ? error.name : typeof error;
+  const message = error instanceof Error ? error.message : String(error);
+  const errorReason = error instanceof DOMException && error.name === "AbortError"
+    ? "aborted"
+    : /Target page, context or browser has been closed/i.test(message)
+      ? "target_closed"
+      : /Execution context was destroyed/i.test(message)
+        ? "execution_context_destroyed"
+        : /timed out|Timeout .* exceeded/i.test(message)
+          ? "operation_timeout"
+          : /Navigation|navigat/i.test(message)
+            ? "navigation_interrupted"
+            : "other";
+  return {
+    errorClassification: classification.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "unknown",
+    errorReason,
+  };
+}
+
+function safeBrowserStageTimeoutEvidence(
+  evidence: (() => Record<string, unknown>) | undefined,
+): Record<string, unknown> {
+  if (!evidence) return {};
+  try {
+    return evidence();
+  } catch {
+    return { timeoutEvidence: "unavailable" };
+  }
+}
+
 const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
@@ -273,6 +307,28 @@ const browserStageTimeouts = {
   fileAttachment: 120_000,
   send: 20_000,
 } as const;
+
+interface ChatGptComposerControlEvidence {
+  controlOperation: "not_started" | "count_outstanding" | "count_settled" | "waiting";
+  countAttempts: number;
+  firstVisibleComposerCount: number | null;
+  lastVisibleComposerCount: number | null;
+}
+
+interface ChatGptComposerControlObservation {
+  traceId: string;
+  stage: string;
+  state: ChatGptComposerControlEvidence;
+}
+
+function composerControlEvidence(state: ChatGptComposerControlEvidence): Record<string, unknown> {
+  return {
+    composerControlOperation: state.controlOperation,
+    composerCountAttempts: state.countAttempts,
+    firstVisibleComposerCount: state.firstVisibleComposerCount,
+    lastVisibleComposerCount: state.lastVisibleComposerCount,
+  };
+}
 
 /**
  * CDP accepts large Input.insertText payloads, but a single oversized edit can outrun ChatGPT's
@@ -621,7 +677,6 @@ export function redactChatGptUiDiagnostic(value: string): string {
 
 const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
 const CHATGPT_BROWSER_SCREENSHOT_CHECKPOINTS = new Set([
-  "response-stalled-30s",
   "turn-failed",
 ]);
 
@@ -644,9 +699,12 @@ export function browserDiagnosticCheckpoint(value: string): string {
 }
 
 let unresolvedChatGptBrowserDiagnosticActions = 0;
+const unresolvedChatGptBrowserDiagnosticActionsByTrace = new Map<string, number>();
 
-export function getUnresolvedChatGptBrowserDiagnosticActionCount(): number {
-  return unresolvedChatGptBrowserDiagnosticActions;
+export function getUnresolvedChatGptBrowserDiagnosticActionCount(traceId?: string): number {
+  return traceId === undefined
+    ? unresolvedChatGptBrowserDiagnosticActions
+    : unresolvedChatGptBrowserDiagnosticActionsByTrace.get(traceId) ?? 0;
 }
 
 export async function runChatGptBrowserDiagnosticAction<T>(
@@ -668,12 +726,17 @@ export async function runChatGptBrowserDiagnosticAction<T>(
     {
       onActionStart: () => {
         unresolvedChatGptBrowserDiagnosticActions += 1;
+        unresolvedChatGptBrowserDiagnosticActionsByTrace.set(
+          options.traceId,
+          (unresolvedChatGptBrowserDiagnosticActionsByTrace.get(options.traceId) ?? 0) + 1,
+        );
         report({
           event: "diagnostic-action-start",
           traceId: options.traceId,
           checkpoint: options.checkpoint,
           actionId: options.actionId,
           outstanding: unresolvedChatGptBrowserDiagnosticActions,
+          traceOutstanding: unresolvedChatGptBrowserDiagnosticActionsByTrace.get(options.traceId) ?? 0,
         });
       },
       onTimeout: ({ elapsedMs }) => {
@@ -685,10 +748,17 @@ export async function runChatGptBrowserDiagnosticAction<T>(
           timeoutMs,
           elapsedMs,
           outstanding: unresolvedChatGptBrowserDiagnosticActions,
+          traceOutstanding: unresolvedChatGptBrowserDiagnosticActionsByTrace.get(options.traceId) ?? 0,
         });
       },
-      onActionSettlement: ({ outcome, elapsedMs, timedOut }) => {
+      onActionSettlement: ({ outcome, elapsedMs, timedOut, error }) => {
         unresolvedChatGptBrowserDiagnosticActions -= 1;
+        const traceOutstanding = (unresolvedChatGptBrowserDiagnosticActionsByTrace.get(options.traceId) ?? 1) - 1;
+        if (traceOutstanding > 0) {
+          unresolvedChatGptBrowserDiagnosticActionsByTrace.set(options.traceId, traceOutstanding);
+        } else {
+          unresolvedChatGptBrowserDiagnosticActionsByTrace.delete(options.traceId);
+        }
         report({
           event: timedOut ? "diagnostic-action-late-settlement" : "diagnostic-action-complete",
           traceId: options.traceId,
@@ -698,6 +768,8 @@ export async function runChatGptBrowserDiagnosticAction<T>(
           elapsedMs,
           timeoutMs,
           outstanding: unresolvedChatGptBrowserDiagnosticActions,
+          traceOutstanding,
+          ...(outcome === "reject" ? boundedBrowserControlErrorEvidence(error) : {}),
         });
       },
     },
@@ -997,7 +1069,20 @@ export class ChatGptBrowserWorker {
     stage: string,
     timeoutMs: number,
     action: (abortSignal: AbortSignal) => Promise<T>,
+    timeoutEvidence?: () => Record<string, unknown>,
   ): Promise<T> {
+    const outstandingDiagnostics = getUnresolvedChatGptBrowserDiagnosticActionCount(traceId);
+    if (outstandingDiagnostics > 0) {
+      reportChatGptBrowserEvidence({
+        event: "stage-blocked-by-outstanding-diagnostic",
+        traceId,
+        stage,
+        outstandingDiagnostics,
+      });
+      throw new Error(
+        `ChatGPT browser stage ${stage} cannot start while a diagnostic control operation is still outstanding`,
+      );
+    }
     const startedAt = performance.now();
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
@@ -1015,6 +1100,7 @@ export class ChatGptBrowserWorker {
             stage,
             timeoutMs,
             elapsedMs: timedOutAtElapsedMs,
+            ...safeBrowserStageTimeoutEvidence(timeoutEvidence),
           });
           rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
           controller.abort();
@@ -1034,7 +1120,7 @@ export class ChatGptBrowserWorker {
             elapsedMs: Math.round(performance.now() - startedAt),
           });
         },
-        () => {
+        error => {
           if (!timeoutWon) return;
           reportChatGptBrowserEvidence({
             event: "stage-action-late-settlement",
@@ -1044,6 +1130,7 @@ export class ChatGptBrowserWorker {
             timedOutAtElapsedMs,
             outcome: "reject",
             elapsedMs: Math.round(performance.now() - startedAt),
+            ...boundedBrowserControlErrorEvidence(error),
           });
         },
       );
@@ -1051,6 +1138,16 @@ export class ChatGptBrowserWorker {
       console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
+      if (!timeoutWon) {
+        reportChatGptBrowserEvidence({
+          event: "stage-action-failed",
+          traceId,
+          stage,
+          elapsedMs: Math.round(performance.now() - startedAt),
+          ...safeBrowserStageTimeoutEvidence(timeoutEvidence),
+          ...boundedBrowserControlErrorEvidence(error),
+        });
+      }
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     } finally {
@@ -1330,14 +1427,69 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  private async activeComposer(page: Page, timeoutMs = 30_000): Promise<Locator> {
+  private async activeComposer(
+    page: Page,
+    timeoutMs = 30_000,
+    observation?: ChatGptComposerControlObservation,
+  ): Promise<Locator> {
     const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
     const deadline = Date.now() + timeoutMs;
     let count = 0;
     while (Date.now() < deadline) {
-      count = await composers.count();
+      if (observation) {
+        observation.state.controlOperation = "count_outstanding";
+        observation.state.countAttempts += 1;
+      }
+      try {
+        count = await composers.count();
+      } catch (error) {
+        if (observation) {
+          observation.state.controlOperation = "count_settled";
+          reportChatGptBrowserEvidence({
+            event: "composer-count-read-failed",
+            traceId: observation.traceId,
+            stage: observation.stage,
+            ...composerControlEvidence(observation.state),
+            ...boundedBrowserControlErrorEvidence(error),
+          });
+        }
+        throw error;
+      }
+      if (observation) {
+        observation.state.controlOperation = "count_settled";
+        observation.state.lastVisibleComposerCount = count;
+        if (observation.state.firstVisibleComposerCount === null) {
+          observation.state.firstVisibleComposerCount = count;
+          reportChatGptBrowserEvidence({
+            event: "composer-count-observed",
+            traceId: observation.traceId,
+            stage: observation.stage,
+            visibleComposerCount: count,
+            observation: "first",
+            ...composerControlEvidence(observation.state),
+          });
+        } else if (count === 1 && observation.state.firstVisibleComposerCount !== 1) {
+          reportChatGptBrowserEvidence({
+            event: "composer-count-observed",
+            traceId: observation.traceId,
+            stage: observation.stage,
+            visibleComposerCount: count,
+            observation: "ready",
+            ...composerControlEvidence(observation.state),
+          });
+        }
+      }
       if (count === 1) return composers.first();
+      if (observation) observation.state.controlOperation = "waiting";
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+    }
+    if (observation) {
+      reportChatGptBrowserEvidence({
+        event: "composer-count-deadline",
+        traceId: observation.traceId,
+        stage: observation.stage,
+        ...composerControlEvidence(observation.state),
+      });
     }
     throw new Error(`ChatGPT did not expose exactly one visible composer (visibleComposers=${count})`);
   }
@@ -1791,11 +1943,7 @@ export class ChatGptBrowserWorker {
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
       await page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
-    try {
-      await this.activeComposer(page);
-    } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
-    }
+    await this.activeComposer(page);
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
     await assertTemporaryChatPage(page);
@@ -2095,52 +2243,6 @@ export class ChatGptBrowserWorker {
     return snapshot;
   }
 
-  private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
-    const responseState = await responseTurn.count()
-      ? await responseTurn.evaluate(element => {
-        const root = element as HTMLElement;
-        const descriptors = [...root.querySelectorAll<HTMLElement>("[role], [data-testid], button, [aria-label]")]
-          .filter(candidate => {
-            const style = getComputedStyle(candidate);
-            return style.visibility !== "hidden" && style.display !== "none";
-          })
-          .slice(-80)
-          .map(candidate => ({
-            tag: candidate.tagName.toLowerCase(),
-            role: candidate.getAttribute("role"),
-            testId: candidate.getAttribute("data-testid"),
-            ariaLabelChars: candidate.getAttribute("aria-label")?.length ?? 0,
-            titleChars: candidate.getAttribute("title")?.length ?? 0,
-            textChars: candidate.innerText.trim().length,
-          }));
-        return {
-          textChars: root.innerText.trim().length,
-          htmlChars: root.innerHTML.length,
-          descriptors,
-        };
-      })
-      : { text: "", descriptors: [] };
-    const overlays = await page.locator('[role="dialog"], [role="alert"], [role="status"]').evaluateAll(elements => (
-      elements
-        .filter(element => {
-          const candidate = element as HTMLElement;
-          const style = getComputedStyle(candidate);
-          return style.visibility !== "hidden" && style.display !== "none";
-        })
-        .slice(-30)
-        .map(element => {
-          const candidate = element as HTMLElement;
-          return {
-            role: candidate.getAttribute("role"),
-            testId: candidate.getAttribute("data-testid"),
-            ariaLabelChars: candidate.getAttribute("aria-label")?.length ?? 0,
-            textChars: candidate.innerText.trim().length,
-          };
-        })
-    )).catch(() => [] as Array<Record<string, string | null>>);
-    return redactChatGptUiDiagnostic(JSON.stringify({ response: responseState, overlays }));
-  }
-
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const attemptStartedAt = Date.now();
@@ -2270,7 +2372,12 @@ export class ChatGptBrowserWorker {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities);
     const prepared = await turn.prepare();
-    const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
+    // Electron-native flight recording already supplies launcher turns with independent visual and
+    // lifecycle evidence. Preserve a Playwright diagnostic only for a terminal managed-Chrome
+    // failure, after no critical browser stage remains to be overlapped.
+    const terminalDiagnostics = launcherSurfaceId
+      ? undefined
+      : new ChatGptBrowserDiagnostics(turn.traceId);
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
@@ -2306,7 +2413,6 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
-      await diagnostics.capture(page, "browser-page-acquired");
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
       );
@@ -2314,31 +2420,32 @@ export class ChatGptBrowserWorker {
         if (page.url() === CHATGPT_TEMPORARY_CHAT_URL) return;
         await page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
       });
-      await diagnostics.capture(page, "temporary-chat-navigation-complete");
-      try {
-        await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
-          this.activeComposer(page)
-        ));
-      } catch {
-        throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
-      }
-      await diagnostics.capture(page, "composer-ready");
+      const composerState: ChatGptComposerControlEvidence = {
+        controlOperation: "not_started",
+        countAttempts: 0,
+        firstVisibleComposerCount: null,
+        lastVisibleComposerCount: null,
+      };
+      await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
+        this.activeComposer(page, undefined, {
+          traceId: turn.traceId,
+          stage: "composer_ready",
+          state: composerState,
+        })
+      ), () => composerControlEvidence(composerState));
       await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {
         await throwIfChatGptSessionFailureAlert(page);
         await assertAuthenticatedChatGptPage(page);
         await assertTemporaryChatPage(page);
       });
-      await diagnostics.capture(page, "session-verified");
       const mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
         this.selectModelAndEffort(
           page,
           turn.modelId,
           turn.reasoning,
           turn.capabilities,
-          checkpoint => diagnostics.capture(page, checkpoint),
         )
       ));
-      await diagnostics.capture(page, "effort-selection-complete");
       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, (stageSignal) => {
         const promptAbortSignal = turn.abortSignal
           ? AbortSignal.any([stageSignal, turn.abortSignal])
@@ -2347,15 +2454,13 @@ export class ChatGptBrowserWorker {
           page,
           prepared.text,
           mode.localTools,
-          checkpoint => diagnostics.capture(page, checkpoint),
+          undefined,
           promptAbortSignal,
         );
       });
-      await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
         this.attachFiles(page, prepared)
       ));
-      await diagnostics.capture(page, "file-attachment-complete");
       const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
       const initialResponseTurnCount = await responseTurns.count();
       const responseTurn = responseTurns.nth(initialResponseTurnCount);
@@ -2448,13 +2553,10 @@ export class ChatGptBrowserWorker {
       try {
         return await Promise.race([
           (async () => {
-          await diagnostics.capture(page, "send-accepted");
-
           let lastHeartbeat = 0;
           let finalText = "";
           let sawRunning = false;
           let loggedCompletionWait = false;
-          let capturedResponse = false;
           const sentAt = Date.now();
           const visibleTrace = new ChatGptVisibleTraceTracker();
           const markdownBuffer = new ChatGptMarkdownBuffer();
@@ -2482,7 +2584,6 @@ export class ChatGptBrowserWorker {
               this.config.autoApproveToolCalls,
               turn.abortSignal,
               CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
-              () => diagnostics.capture(page, "tool-confirmation-visible"),
             )) {
               await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
               continue;
@@ -2511,10 +2612,6 @@ export class ChatGptBrowserWorker {
               completionActionVisible: snapshot.completionActionVisible,
             });
             if (snapshot.responsePresent) {
-              if (!capturedResponse) {
-                capturedResponse = true;
-                await diagnostics.capture(page, "response-visible");
-              }
               const textDelta = markdownBuffer.observe(snapshot.markdownSegments);
               const progressSignature = chatGptTurnProgressSignature({
                 visibleText: snapshot.visibleText,
@@ -2565,12 +2662,8 @@ export class ChatGptBrowserWorker {
               }
               if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
                 loggedCompletionWait = true;
-                await diagnostics.capture(page, "response-stalled-30s");
-                const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn).catch(error => JSON.stringify({
-                  diagnosticError: error instanceof Error ? error.message : String(error),
-                }));
                 console.warn(
-                  `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
+                  `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, htmlChars=${snapshot.fullHtml.length}, completionActionVisible=${snapshot.completionActionVisible})`,
                 );
               }
             } else {
@@ -2589,7 +2682,6 @@ export class ChatGptBrowserWorker {
             const state = await this.context.storageState();
             atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
           }
-          await diagnostics.capture(page, "turn-completed");
           console.info(`[chatgpt-web] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
           return finalText;
           })(),
@@ -2618,8 +2710,8 @@ export class ChatGptBrowserWorker {
           });
         }
       }
-      if (diagnosticPage && !diagnosticPage.isClosed()) {
-        await diagnostics.capture(diagnosticPage, "turn-failed", error);
+      if (terminalDiagnostics && diagnosticPage && !diagnosticPage.isClosed()) {
+        await terminalDiagnostics.capture(diagnosticPage, "turn-failed", error);
       }
       throw error;
     } finally {

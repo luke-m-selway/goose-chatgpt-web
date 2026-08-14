@@ -1436,7 +1436,7 @@ test("browser stage diagnostics use safe bounded artifact names", () => {
   expect(browserDiagnosticCheckpoint("x".repeat(200))).toHaveLength(80);
 });
 
-test("browser diagnostics only invoke screenshots for stalled and failed checkpoints", async () => {
+test("browser diagnostics only invoke screenshots for the terminal failure checkpoint", async () => {
   const screenshots: string[] = [];
   const page = {
     screenshot: async () => {
@@ -1458,9 +1458,8 @@ test("browser diagnostics only invoke screenshots for stalled and failed checkpo
   }
   expect(screenshots).toHaveLength(0);
 
-  expect(await captureChatGptBrowserDiagnosticScreenshot(page, "response-stalled-30s")).toEqual(Buffer.from("png"));
   expect(await captureChatGptBrowserDiagnosticScreenshot(page, "turn-failed")).toEqual(Buffer.from("png"));
-  expect(screenshots).toHaveLength(2);
+  expect(screenshots).toHaveLength(1);
 
   const failingPage = {
     screenshot: async () => { throw new Error("synthetic screenshot failure"); },
@@ -1468,40 +1467,38 @@ test("browser diagnostics only invoke screenshots for stalled and failed checkpo
   expect(await captureChatGptBrowserDiagnosticScreenshot(failingPage, "turn-failed")).toBeUndefined();
 });
 
-test("browser stage diagnostics preserve every critical local checkpoint", () => {
+test("routine Playwright diagnostics are absent from the critical browser path", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  for (const checkpoint of [
-    "browser-page-acquired",
-    "temporary-chat-navigation-complete",
-    "composer-ready",
-    "session-verified",
-    "effort-control-ready",
-    "effort-menu-open-requested",
-    "effort-selected",
-    "connector-mention-triggered",
-    "connector-menu-visible",
-    "connector-menu-missing",
-    "connector-selected",
-    "prompt-attachment-complete",
-    "file-attachment-complete",
-    "send-accepted",
-    "tool-confirmation-visible",
-    "response-visible",
-    "response-stalled-30s",
-    "turn-completed",
-    "turn-failed",
-  ]) {
-    expect(workerSource).toContain(`"${checkpoint}"`);
-  }
+  const browserTurn = workerSource.slice(
+    workerSource.indexOf("private async runBrowserTurn"),
+    workerSource.indexOf("\n  }\n}", workerSource.indexOf("private async runBrowserTurn")),
+  );
   expect(workerSource).toContain('join(getConfigDir(), "diagnostics", "browser-turns")');
   expect(workerSource).toContain('page.screenshot({ animations: "disabled", caret: "hide"');
   expect(workerSource).toContain("atomicWriteFile(join(this.directory, `${stem}.png`), screenshot)");
   expect(workerSource).toContain("CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10");
-  const sendStage = workerSource.slice(
-    workerSource.indexOf('this.runStage(turn.traceId, "send"'),
-    workerSource.indexOf("const controlLiveness = startPostSendBrowserControlLiveness"),
+  expect(browserTurn.match(/terminalDiagnostics\.capture/g)).toHaveLength(1);
+  expect(browserTurn).not.toContain("diagnostics.capture");
+  expect(browserTurn).not.toContain("stalledTurnDiagnostic");
+  expect(browserTurn).toContain("const terminalDiagnostics = launcherSurfaceId");
+  expect(browserTurn).toContain('terminalDiagnostics.capture(diagnosticPage, "turn-failed", error)');
+});
+
+test("composer readiness preserves control failures and leaves authentication classification to explicit checks", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const browserTurn = workerSource.slice(
+    workerSource.indexOf("private async runBrowserTurn"),
+    workerSource.indexOf("\n  }\n}", workerSource.indexOf("private async runBrowserTurn")),
   );
-  expect(sendStage).not.toContain("diagnostics.capture");
+  const composerStart = browserTurn.indexOf('this.runStage(turn.traceId, "composer_ready"');
+  const sessionStart = browserTurn.indexOf('this.runStage(turn.traceId, "session_verification"');
+  const composerSection = browserTurn.slice(composerStart, sessionStart);
+
+  expect(composerSection).toContain("this.activeComposer(page");
+  expect(composerSection).not.toContain("catch");
+  expect(workerSource).not.toContain("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
+  expect(browserTurn.slice(sessionStart)).toContain("throwIfChatGptSessionFailureAlert(page)");
+  expect(browserTurn.slice(sessionStart)).toContain("assertAuthenticatedChatGptPage(page)");
 });
 
 test("visible DOM trace interleaves statuses and explicit intermediate commentary", () => {
@@ -1820,15 +1817,15 @@ test("completed-turn-action watchdog falls back to visible text when no progress
   expect(health.update({ ...withoutSignature, currentText: "first and more" }, 2_450)).toContain("DOM may have changed");
 });
 
-test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
+test("the 30-second completion notice reuses the current bounded DOM snapshot", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  const start = workerSource.indexOf("private async stalledTurnDiagnostic");
-  const end = workerSource.indexOf("private async runExclusive", start);
-  const diagnosticSource = workerSource.slice(start, end);
-  expect(diagnosticSource).toContain("textChars:");
-  expect(diagnosticSource).toContain("htmlChars:");
-  expect(diagnosticSource).not.toMatch(/\btext:\s*(?:root|candidate)\.innerText/);
-  expect(diagnosticSource).not.toMatch(/\bariaLabel:\s*candidate\.getAttribute/);
+  const start = workerSource.indexOf("if (!loggedCompletionWait");
+  const end = workerSource.indexOf("\n              }", start);
+  const noticeSource = workerSource.slice(start, end);
+  expect(noticeSource).toContain("snapshot.visibleText.length");
+  expect(noticeSource).toContain("snapshot.fullHtml.length");
+  expect(noticeSource).not.toContain("page.");
+  expect(workerSource).not.toContain("stalledTurnDiagnostic");
 });
 
 test("browser completion requires ChatGPT's response-scoped copy action", () => {

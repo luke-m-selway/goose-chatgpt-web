@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Page } from "playwright-core";
 import {
+  boundedBrowserControlErrorEvidence,
   ChatGptBrowserWorker,
   CHATGPT_SUBMISSION_POLL_INTERVAL_MS,
   getUnresolvedChatGptBrowserDiagnosticActionCount,
@@ -52,6 +53,7 @@ const runStage = (ChatGptBrowserWorker.prototype as unknown as {
     stage: string,
     timeoutMs: number,
     action: (signal: AbortSignal) => Promise<T>,
+    timeoutEvidence?: () => Record<string, unknown>,
   ): Promise<T>;
 }).runStage;
 
@@ -107,10 +109,223 @@ test("a timed-out stage records a later reject without an unhandled rejection", 
         traceId: "trace_late_reject",
         stage: "send",
         outcome: "reject",
+        errorClassification: "Error",
+        errorReason: "other",
       }));
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+test("a stale timed-out diagnostic cannot overlap a later critical stage for the same trace", async () => {
+  const events: ChatGptBrowserEvidence[] = [];
+  const diagnostic = deferred<string>();
+  const traceId = "trace_no_diagnostic_overlap";
+  const raced = runChatGptBrowserDiagnosticAction(
+    () => diagnostic.promise,
+    {
+      traceId,
+      checkpoint: "turn-failed",
+      actionId: "01-turn-failed",
+      timeoutMs: 5,
+      report: event => events.push(event),
+    },
+  );
+  await expect(raced).rejects.toThrow("ChatGPT browser diagnostic capture timed out");
+  expect(getUnresolvedChatGptBrowserDiagnosticActionCount(traceId)).toBe(1);
+
+  let criticalStageStarted = false;
+  await expect(runStage.call({}, traceId, "composer_ready", 50, async () => {
+    criticalStageStarted = true;
+    return "unexpected";
+  })).rejects.toThrow("cannot start while a diagnostic control operation is still outstanding");
+  expect(criticalStageStarted).toBeFalse();
+
+  diagnostic.resolve("late");
+  await nextTask();
+  expect(getUnresolvedChatGptBrowserDiagnosticActionCount(traceId)).toBe(0);
+  expect(events).toContainEqual(expect.objectContaining({
+    event: "diagnostic-action-late-settlement",
+    traceId,
+    outcome: "resolve",
+    traceOutstanding: 0,
+  }));
+});
+
+test("composer readiness timeout records an outstanding count operation without inventing a count", async () => {
+  await captureStageEvidence(async logs => {
+    const count = deferred<number>();
+    const page = {
+      locator: () => ({
+        filter: () => ({
+          count: () => count.promise,
+          first: () => ({ id: "composer" }),
+        }),
+      }),
+    };
+    const state = {
+      controlOperation: "not_started" as const,
+      countAttempts: 0,
+      firstVisibleComposerCount: null,
+      lastVisibleComposerCount: null,
+    };
+    const activeComposer = (ChatGptBrowserWorker.prototype as unknown as {
+      activeComposer(
+        page: unknown,
+        timeoutMs: number | undefined,
+        observation: { traceId: string; stage: string; state: typeof state },
+      ): Promise<unknown>;
+    }).activeComposer;
+    const raced = runStage.call(
+      {},
+      "trace_composer_control",
+      "composer_ready",
+      5,
+      () => activeComposer.call({}, page, 500, {
+        traceId: "trace_composer_control",
+        stage: "composer_ready",
+        state,
+      }),
+      () => ({
+        composerControlOperation: state.controlOperation,
+        composerCountAttempts: state.countAttempts,
+        firstVisibleComposerCount: state.firstVisibleComposerCount,
+        lastVisibleComposerCount: state.lastVisibleComposerCount,
+      }),
+    );
+
+    await expect(raced).rejects.toThrow("ChatGPT browser stage timed out: composer_ready");
+    expect(evidenceFromLogs(logs)).toContainEqual(expect.objectContaining({
+      event: "stage-action-timeout",
+      stage: "composer_ready",
+      composerControlOperation: "count_outstanding",
+      composerCountAttempts: 1,
+      firstVisibleComposerCount: null,
+      lastVisibleComposerCount: null,
+    }));
+
+    count.resolve(1);
+    await nextTask();
+    expect(evidenceFromLogs(logs)).toContainEqual(expect.objectContaining({
+      event: "composer-count-observed",
+      visibleComposerCount: 1,
+    }));
+    expect(evidenceFromLogs(logs)).toContainEqual(expect.objectContaining({
+      event: "stage-action-late-settlement",
+      stage: "composer_ready",
+      outcome: "resolve",
+    }));
+  });
+});
+
+test("composer readiness preserves an immediate browser-control error", async () => {
+  await captureStageEvidence(async logs => {
+    const controlError = new Error("Execution context was destroyed");
+    const page = {
+      locator: () => ({
+        filter: () => ({
+          count: async () => { throw controlError; },
+          first: () => ({ id: "composer" }),
+        }),
+      }),
+    };
+    const state = {
+      controlOperation: "not_started" as const,
+      countAttempts: 0,
+      firstVisibleComposerCount: null,
+      lastVisibleComposerCount: null,
+    };
+    const activeComposer = (ChatGptBrowserWorker.prototype as unknown as {
+      activeComposer(
+        page: unknown,
+        timeoutMs: number | undefined,
+        observation: { traceId: string; stage: string; state: typeof state },
+      ): Promise<unknown>;
+    }).activeComposer;
+
+    await expect(runStage.call(
+      {},
+      "trace_composer_control_error",
+      "composer_ready",
+      50,
+      () => activeComposer.call({}, page, 500, {
+        traceId: "trace_composer_control_error",
+        stage: "composer_ready",
+        state,
+      }),
+      () => ({
+        composerControlOperation: state.controlOperation,
+        composerCountAttempts: state.countAttempts,
+        firstVisibleComposerCount: state.firstVisibleComposerCount,
+        lastVisibleComposerCount: state.lastVisibleComposerCount,
+      }),
+    )).rejects.toBe(controlError);
+    expect(evidenceFromLogs(logs)).toContainEqual(expect.objectContaining({
+      event: "composer-count-read-failed",
+      stage: "composer_ready",
+      composerControlOperation: "count_settled",
+      composerCountAttempts: 1,
+      errorReason: "execution_context_destroyed",
+    }));
+    expect(evidenceFromLogs(logs)).toContainEqual(expect.objectContaining({
+      event: "stage-action-failed",
+      stage: "composer_ready",
+      errorReason: "execution_context_destroyed",
+    }));
+  });
+});
+
+test("composer readiness records bounded zero and multiple count evidence", async () => {
+  for (const visibleComposerCount of [0, 2]) {
+    await captureStageEvidence(async logs => {
+      const page = {
+        locator: () => ({
+          filter: () => ({
+            count: async () => visibleComposerCount,
+            first: () => ({ id: "composer" }),
+          }),
+        }),
+      };
+      const state = {
+        controlOperation: "not_started" as const,
+        countAttempts: 0,
+        firstVisibleComposerCount: null,
+        lastVisibleComposerCount: null,
+      };
+      const activeComposer = (ChatGptBrowserWorker.prototype as unknown as {
+        activeComposer(
+          page: unknown,
+          timeoutMs: number,
+          observation: { traceId: string; stage: string; state: typeof state },
+        ): Promise<unknown>;
+      }).activeComposer;
+
+      await expect(activeComposer.call({}, page, 1, {
+        traceId: `trace_composer_count_${visibleComposerCount}`,
+        stage: "composer_ready",
+        state,
+      })).rejects.toThrow(`visibleComposers=${visibleComposerCount}`);
+      const events = evidenceFromLogs(logs);
+      expect(events).toContainEqual(expect.objectContaining({
+        event: "composer-count-observed",
+        visibleComposerCount,
+        observation: "first",
+      }));
+      expect(events).toContainEqual(expect.objectContaining({
+        event: "composer-count-deadline",
+        lastVisibleComposerCount: visibleComposerCount,
+      }));
+    });
+  }
+});
+
+test("late browser-control errors use bounded reason codes instead of raw messages", () => {
+  expect(boundedBrowserControlErrorEvidence(
+    new Error("Target page, context or browser has been closed; secret query=value"),
+  )).toEqual({
+    errorClassification: "Error",
+    errorReason: "target_closed",
   });
 });
 
