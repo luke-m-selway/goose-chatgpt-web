@@ -167,6 +167,9 @@ test("a browser outcome can precede an independently observed outer body failure
     "utf8",
   ));
   expect(summary.responsesTransportOutcome).toBe("body-error");
+  const index = readFileSync(join(directory, "index.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(index).toHaveLength(1);
+  expect(index[0]).toMatchObject({ traceId: "trace_body_error", responsesTransportOutcome: "body-error" });
 });
 
 test("ordering and six-hundred-second durations are represented without a special timeout assumption", () => {

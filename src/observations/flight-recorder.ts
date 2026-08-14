@@ -185,7 +185,10 @@ export class ChatGptFlightRecorder {
       const safe = sanitizeFlightEvent(input);
       const eventId = randomUUID();
       safe.eventId = eventId;
-      const shouldIndex = input.event === "browser-attempt-ended";
+      const shouldIndex = input.event === "browser-attempt-ended"
+        || (input.category === "responses" && [
+          "body-normal-close", "body-error", "client-cancellation",
+        ].includes(input.event));
       this.updateState(safe);
       const state = this.traces.get(input.traceId)!;
       const directory = this.traceDirectory(input.traceId, state.startedAt);
@@ -198,7 +201,9 @@ export class ChatGptFlightRecorder {
           // BrowserHost release and event-triggered native screenshot pinning happen immediately
           // after the helper reports its outcome. This delay affects only the recorder queue and
           // lets the summary include those cross-process appends without delaying the turn.
-          await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+          if (input.event === "browser-attempt-ended") {
+            await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+          }
           await this.appendIndex(input.traceId);
         }
       });
@@ -366,16 +371,55 @@ export class ChatGptFlightRecorder {
     const state = this.traces.get(traceId);
     if (!state) return;
     const directory = this.traceDirectory(traceId, state.startedAt);
+    let events: Array<Record<string, unknown>>;
+    try {
+      events = (await readFile(join(directory, "events.jsonl"), "utf8")).split("\n").filter(Boolean).flatMap(line => {
+        try {
+          const parsed = JSON.parse(line);
+          return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? [parsed as Record<string, unknown>]
+            : [];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      return;
+    }
+    const browserEnded = events.some(event => event.event === "browser-attempt-ended");
+    const transportEnded = events.some(event => [
+      "body-normal-close", "body-error", "client-cancellation",
+    ].includes(String(event.event)));
+    if (!browserEnded || !transportEnded) return;
+
+    const markerPath = join(directory, ".indexed-v1");
+    let marker;
+    try {
+      marker = await open(markerPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
     const summary = await summarizeJournal(
       join(directory, "events.jsonl"),
       this.stateSummary(state),
       join(this.config.rootDir, "processes.jsonl"),
     );
-    await privateDirectory(this.config.rootDir);
-    await appendDurable(join(this.config.rootDir, "index.jsonl"), `${JSON.stringify({
-      ...summary,
-      indexedAt: new Date().toISOString(),
-    })}\n`);
+    try {
+      await privateDirectory(this.config.rootDir);
+      await appendDurable(join(this.config.rootDir, "index.jsonl"), `${JSON.stringify({
+        ...summary,
+        indexedAt: new Date().toISOString(),
+      })}\n`);
+      await marker.writeFile("indexed\n");
+      await marker.sync();
+      try { await chmod(markerPath, 0o600); } catch {}
+    } catch (error) {
+      await marker.close().catch(() => {});
+      await rm(markerPath, { force: true }).catch(() => {});
+      throw error;
+    }
+    await marker.close();
   }
 }
 
