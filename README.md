@@ -123,6 +123,8 @@ Start with [`docs/README.md`](docs/README.md). It classifies current, active, de
 
 ## Development
 
+Development requires Bun 1.3.14.
+
 This repository currently uses Bun for the TypeScript/runtime toolchain and Electron/Node semantics for the BrowserHost helper. Before merging runtime changes, use the repository's normal verification suite:
 
 ```bash
