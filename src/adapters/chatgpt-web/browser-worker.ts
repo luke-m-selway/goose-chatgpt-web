@@ -58,6 +58,7 @@ import {
   startPostSendBrowserControlLiveness,
   withBrowserControlTimeout,
 } from "./control-liveness";
+import { recordChatGptFlightEvent } from "../../observations/flight-recorder";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -107,6 +108,35 @@ export type ChatGptBrowserEvidenceReporter = (evidence: ChatGptBrowserEvidence) 
 export const reportChatGptBrowserEvidence: ChatGptBrowserEvidenceReporter = evidence => {
   try {
     console.info(`[chatgpt-web] evidence ${JSON.stringify(evidence)}`);
+    const { samples, ...metadata } = evidence;
+    recordChatGptFlightEvent({ category: "browser", ...metadata });
+    if (evidence.event === "submission-poll-window" && Array.isArray(samples)) {
+      for (const sample of samples) {
+        if (!sample || typeof sample !== "object" || Array.isArray(sample)) continue;
+        const candidate = sample as Record<string, unknown>;
+        const numeric = (key: string): number | null | undefined => {
+          const value = candidate[key];
+          return value === null || (typeof value === "number" && Number.isFinite(value)) ? value : undefined;
+        };
+        recordChatGptFlightEvent({
+          category: "browser",
+          event: "submission-poll-sample",
+          traceId: evidence.traceId,
+          iteration: numeric("iteration"),
+          startGapMs: numeric("startGapMs"),
+          pollDelayMs: numeric("pollDelayMs"),
+          readMs: numeric("readMs"),
+          sessionAlertReadMs: numeric("sessionAlertReadMs"),
+          rateLimitReadMs: numeric("rateLimitReadMs"),
+          countsReadMs: numeric("countsReadMs"),
+          generationReadMs: numeric("generationReadMs"),
+          completed: candidate.completed === true,
+          userTurnCount: numeric("userTurnCount"),
+          assistantTurnCount: numeric("assistantTurnCount"),
+          generationRunning: candidate.generationRunning === true,
+        });
+      }
+    }
   } catch {
     // Evidence collection must never affect a browser turn or its verdict.
   }
@@ -349,6 +379,10 @@ export type ChatGptSubmissionEvidence = "user_turn" | "assistant_turn" | "genera
 export function chatGptGenerationRunningLabelMatches(text: string): boolean {
   const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
   return /\bstop\b/.test(normalized) || /\bcancel\b/.test(normalized);
+}
+
+export function chatGptTransientConnectionInterruptedTextMatches(text: string): boolean {
+  return /connection interrupted\.\s*waiting for the complete answer/i.test(text.replace(/\s+/g, " ").trim());
 }
 
 export async function isChatGptGenerationRunning(page: Page): Promise<boolean> {
@@ -2109,7 +2143,33 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+    const attemptStartedAt = Date.now();
+    recordChatGptFlightEvent({
+      category: "browser",
+      event: "browser-attempt-started",
+      traceId: turn.traceId,
+      backendModel: turn.modelId,
+      effort: turn.reasoning ?? "default",
+      activeBrowserTurns: this.activeRuns.size,
+    });
+    if (this.config.browserHost !== "launcher") {
+      try {
+        const answer = await this.runBrowserTurn(turn);
+        recordChatGptFlightEvent({
+          category: "browser", event: "browser-attempt-ended", traceId: turn.traceId,
+          outcome: "completed", elapsedMs: Date.now() - attemptStartedAt,
+        });
+        return answer;
+      } catch (error) {
+        recordChatGptFlightEvent({
+          category: "browser", event: "browser-attempt-ended", traceId: turn.traceId,
+          outcome: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed",
+          errorClassification: error instanceof ChatGptWebAdapterError ? error.code : error instanceof Error ? error.name : "unknown",
+          elapsedMs: Date.now() - attemptStartedAt,
+        });
+        throw error;
+      }
+    }
 
     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
       phase: "start",
@@ -2119,6 +2179,14 @@ export class ChatGptBrowserWorker {
     const surfaceId = lease.surfaceId;
     if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
     let nativeLifecycle = lease.lifecycle;
+    recordChatGptFlightEvent({
+      category: "browser",
+      event: "browser-surface-leased",
+      traceId: turn.traceId,
+      surfaceId,
+      ...(nativeLifecycle?.rendererPid ? { rendererPid: nativeLifecycle.rendererPid } : {}),
+      activeBrowserTurns: this.activeRuns.size,
+    });
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
     let originalError: unknown;
@@ -2168,10 +2236,27 @@ export class ChatGptBrowserWorker {
           ...(terminalMessage ? { message: terminalMessage } : {}),
         });
       } catch (controlError) {
-        if (!originalError) throw controlError;
+        if (!originalError) {
+          originalError = controlError;
+          terminal = "failed";
+          throw controlError;
+        }
         console.error(
           `[chatgpt-web] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
         );
+      } finally {
+        recordChatGptFlightEvent({
+          category: "browser",
+          event: "browser-attempt-ended",
+          traceId: turn.traceId,
+          surfaceId,
+          ...(nativeLifecycle?.rendererPid ? { rendererPid: nativeLifecycle.rendererPid } : {}),
+          outcome: terminal,
+          errorClassification: originalError instanceof ChatGptWebAdapterError
+            ? originalError.code
+            : originalError instanceof Error ? originalError.name : terminal === "completed" ? "none" : "unknown",
+          elapsedMs: Date.now() - attemptStartedAt,
+        });
       }
     }
   }
@@ -2332,6 +2417,19 @@ export class ChatGptBrowserWorker {
           // were failing.
           onEvent: event => {
             const native = getNativeLifecycle?.();
+            recordChatGptFlightEvent({
+              category: "browser",
+              event: `control-liveness-${event.kind}`,
+              traceId: turn.traceId,
+              outstandingMs: event.outstandingMs,
+              sinceHealthyMs: event.sinceHealthyMs,
+              progressing: event.progressing,
+              domReadFailures,
+              nativeStatus: native?.status ?? "unavailable",
+              nativeEvent: native?.event ?? "unavailable",
+              ...(native?.rendererPid ? { rendererPid: native.rendererPid } : {}),
+              ...(native?.surfaceId ?? launcherSurfaceId ? { surfaceId: native?.surfaceId ?? launcherSurfaceId } : {}),
+            });
             console.warn(
               `[chatgpt-web] browser turn ${turn.traceId} control-liveness=${event.kind}`
               + ` outstandingMs=${event.outstandingMs} sinceHealthyMs=${event.sinceHealthyMs}`
@@ -2362,6 +2460,7 @@ export class ChatGptBrowserWorker {
           const markdownBuffer = new ChatGptMarkdownBuffer();
           const completionTracker = new ChatGptCompletionTracker();
           const domHealthTracker = new ChatGptTurnDomHealthTracker();
+          let connectionInterruptedObserved = false;
           for (;;) {
             if (page.isClosed()) {
               throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
@@ -2396,6 +2495,16 @@ export class ChatGptBrowserWorker {
             const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
             const running = await stop.isVisible().catch(() => false);
             if (running) sawRunning = true;
+            if (!connectionInterruptedObserved
+              && chatGptTransientConnectionInterruptedTextMatches(snapshot.visibleText)) {
+              connectionInterruptedObserved = true;
+              reportChatGptBrowserEvidence({
+                event: "chatgpt-transient-connection-interrupted",
+                traceId: turn.traceId,
+                running,
+                completionActionVisible: snapshot.completionActionVisible,
+              });
+            }
             await throwIfChatGptTerminalErrorAlert(responseTurn, {
               visibleText: snapshot.visibleText,
               running,
@@ -2491,6 +2600,24 @@ export class ChatGptBrowserWorker {
         console.info(`[chatgpt-web] browser turn ${turn.traceId} dom-read-summary failures=${domReadFailures}`);
       }
     } catch (error) {
+      if (error instanceof ChatGptWebAdapterError) {
+        const uiEvent = error.status === 429
+          ? "chatgpt-ui-rate-limit"
+          : error.code === "upstream_server_error"
+            ? "chatgpt-ui-terminal-error"
+            : error.code === "chatgpt_subscription_unavailable"
+              ? "chatgpt-ui-session-failure"
+              : undefined;
+        if (uiEvent) {
+          recordChatGptFlightEvent({
+            category: "browser",
+            event: uiEvent,
+            traceId: turn.traceId,
+            errorClassification: error.code,
+            retryable: error.retryable,
+          });
+        }
+      }
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
       }

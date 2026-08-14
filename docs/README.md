@@ -15,6 +15,7 @@ This directory is the authoritative handoff for the current Goose-first runtime 
 - [`../README.md`](../README.md) — current project shape and status.
 - [`architecture.md`](architecture.md) — ownership and request/tool flow.
 - [`runtime-lifecycle.md`](runtime-lifecycle.md) — canonical lifecycle, BrowserHost readiness, macOS autostart, and remaining reboot proof.
+- [`chatgpt-web-flight-recorder.md`](chatgpt-web-flight-recorder.md) — optional passive trace, transport, broker, retry, and Electron-native screenshot evidence for ordinary use.
 - [`security-model.md`](security-model.md) — current trust/capability boundaries.
 - [`../AGENTS.md`](../AGENTS.md) — mandatory runtime/safety rules for agents.
 

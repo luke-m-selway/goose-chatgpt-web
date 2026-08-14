@@ -4,6 +4,8 @@ import type { AdapterEvent, CodexParsedRequest } from "../types";
 export interface IncomingMeta {
   headers: Headers;
   abortSignal?: AbortSignal;
+  /** Correlates this adapter round with passive Responses transport telemetry. */
+  flightRequestId?: string;
 }
 
 export interface ProviderAdapter {

@@ -14,6 +14,7 @@ test("browser control server authenticates and owns turn visibility", async () =
     revision: 0,
   };
   const host = {
+    flightRecorder: { observe: (...args) => calls.push(["observe", ...args]) },
     beginTurn: (...args) => {
       calls.push(["start", ...args]);
       return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", lifecycle };
@@ -64,6 +65,13 @@ test("browser control server authenticates and owns turn visibility", async () =
     assert.equal(heartbeat.status, 200);
     assert.deepEqual(await heartbeat.json(), { ok: true, lifecycle });
 
+    const observation = await fetch(`${descriptor.endpoint}/v1/observation/event`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ traceId: "abcdef123456", event: "response.failed", eventId: "event-1" }),
+    });
+    assert.equal(observation.status, 200);
+
     const ownerlessEnd = await fetch(`${descriptor.endpoint}/v1/turn/end`, {
       method: "POST",
       headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
@@ -85,6 +93,7 @@ test("browser control server authenticates and owns turn visibility", async () =
     assert.deepEqual(calls, [
       ["start", "abcdef123456", true, process.pid],
       ["heartbeat", "abcdef123456", process.pid],
+      ["observe", "abcdef123456", "response.failed", "event-1"],
       ["end", "abcdef123456", process.pid, "completed", true, undefined],
     ]);
     assert.equal(logs.some(([, event, detail]) => (

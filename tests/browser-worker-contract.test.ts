@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, captureChatGptBrowserDiagnosticScreenshot, chatGptGenerationRunningLabelMatches, chatGptPromptChunkEnd, chatGptSubmissionEvidence, chatGptSubmissionEvidenceAfterSend, chatGptTurnProgressSignature, isChatGptGenerationRunning, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, captureChatGptBrowserDiagnosticScreenshot, chatGptGenerationRunningLabelMatches, chatGptPromptChunkEnd, chatGptSubmissionEvidence, chatGptSubmissionEvidenceAfterSend, chatGptTransientConnectionInterruptedTextMatches, chatGptTurnProgressSignature, isChatGptGenerationRunning, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -25,6 +25,13 @@ test("send-stage generation detection treats a visible stop control as live gene
   expect(chatGptGenerationRunningLabelMatches("Stop generating")).toBeTrue();
   expect(chatGptGenerationRunningLabelMatches("Cancel generating")).toBeTrue();
   expect(chatGptGenerationRunningLabelMatches("Continue")).toBeFalse();
+});
+
+test("existing response DOM reads recognize ChatGPT's transient connection interruption text", () => {
+  expect(chatGptTransientConnectionInterruptedTextMatches(
+    "Connection interrupted. Waiting for the complete answer",
+  )).toBeTrue();
+  expect(chatGptTransientConnectionInterruptedTextMatches("Generating an answer")).toBeFalse();
 });
 
 test("browser turns run concurrently up to the five-tab limit", async () => {

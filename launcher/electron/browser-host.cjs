@@ -253,7 +253,7 @@ function appendFailure(primary, label, secondary) {
 }
 
 class BrowserHost {
-  constructor({ window, descriptorPath, cdpPort, control, helper, logger, loginWithSystemBrowser, publishState }) {
+  constructor({ window, descriptorPath, cdpPort, control, helper, logger, loginWithSystemBrowser, publishState, flightRecorder }) {
     if (typeof loginWithSystemBrowser !== "function") {
       throw new Error("Browser host system-browser login operation is unavailable");
     }
@@ -265,6 +265,7 @@ class BrowserHost {
     this.logger = logger;
     this.loginWithSystemBrowser = loginWithSystemBrowser;
     this.publishState = publishState;
+    this.flightRecorder = flightRecorder;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -405,6 +406,25 @@ class BrowserHost {
     view.setBounds(this.bounds);
     view.setVisible(false);
     this.bindTurnContents(tab);
+    this.flightRecorder?.startSurface({
+      traceId: tab.traceId,
+      surfaceId: tab.surfaceId,
+      rendererPid: tab.rendererPid,
+      webContents: view.webContents,
+      getActiveBrowserTurns: () => [...this.turnTabs.values()].filter(candidate => candidate.status === "running").length,
+    });
+    this.flightRecorder?.record(tab.traceId, "browser-tab-created", {
+      surfaceId: tab.surfaceId,
+      rendererPid: tab.rendererPid,
+      browserHostPid: process.pid,
+      helperPid: tab.helperPid,
+      activeBrowserTurns: this.turnTabs.size,
+    });
+    this.flightRecorder?.record(tab.traceId, "process-identity", {
+      browserHostPid: process.pid,
+      helperPid: tab.helperPid,
+      rendererPid: tab.rendererPid,
+    });
     void view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("browser.tab_initialization_failed", {
@@ -412,7 +432,7 @@ class BrowserHost {
         traceId: tab.traceId,
         message,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "initial-load-failed");
     });
     return tab;
   }
@@ -474,7 +494,7 @@ class BrowserHost {
         errorDescription,
         url,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "navigation-failed");
     });
     contents.on("render-process-gone", (_event, details) => {
       this.updateTurnLifecycle(tab, "gone", "render-process-gone", details.reason);
@@ -488,11 +508,12 @@ class BrowserHost {
         reason: details.reason,
         exitCode: details.exitCode,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "render-process-gone");
     });
     contents.on("unresponsive", () => {
       if (!this.turnTabs.has(tab.id)) return;
       this.updateTurnLifecycle(tab, "unresponsive", "unresponsive");
+      this.flightRecorder?.observe(tab.traceId, "renderer-unresponsive");
       this.logger.warn("browser.tab_renderer_unresponsive", {
         tabId: tab.id,
         traceId: tab.traceId,
@@ -532,7 +553,7 @@ class BrowserHost {
         rendererPid: tab.rendererPid,
         lifecycleRevision: tab.rendererLifecycleRevision,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "web-contents-destroyed");
     });
   }
 
@@ -558,6 +579,14 @@ class BrowserHost {
     tab.rendererLifecycleEvent = event;
     tab.rendererLifecycleRevision = (tab.rendererLifecycleRevision ?? 0) + 1;
     tab.rendererLifecycleReason = typeof reason === "string" && reason ? reason : undefined;
+    this.flightRecorder?.updateSurface(tab.surfaceId, { rendererPid: tab.rendererPid });
+    this.flightRecorder?.record(tab.traceId, `browser-lifecycle-${event}`, {
+      status,
+      rendererPid: tab.rendererPid,
+      revision: tab.rendererLifecycleRevision,
+      ...(tab.rendererLifecycleReason ? { reason: tab.rendererLifecycleReason } : {}),
+    });
+    if (["gone", "destroyed"].includes(status)) this.flightRecorder?.observe(tab.traceId, `renderer-${status}`);
   }
 
   turnLifecycleSnapshot(tab) {
@@ -861,7 +890,7 @@ class BrowserHost {
     if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
     tab.lastHeartbeatAt = Date.now();
     const lifecycle = this.turnLifecycleSnapshot(tab);
-    if (lifecycle.status === "destroyed") this.removeTurnTab(tab, true);
+    if (lifecycle.status === "destroyed") this.removeTurnTab(tab, true, "lifecycle-destroyed");
     return lifecycle;
   }
 
@@ -880,7 +909,7 @@ class BrowserHost {
         helperPid: tab.helperPid,
         evidence,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, evidence);
     }
   }
 
@@ -931,7 +960,7 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  removeTurnTab(tab, abortRunning) {
+  removeTurnTab(tab, abortRunning, releaseReason = abortRunning ? "host-abort" : "turn-ended") {
     if (!this.turnTabs.has(tab.id)) return;
     this.turnTabs.delete(tab.id);
     if (abortRunning && tab.status === "running") {
@@ -942,6 +971,11 @@ class BrowserHost {
       }
       tab.status = "aborted";
     }
+    this.flightRecorder?.record(tab.traceId, "browser-surface-release", {
+      outcome: tab.status,
+      reason: releaseReason,
+    });
+    this.flightRecorder?.stopSurface(tab.surfaceId, tab.status);
     try { this.window.contentView.removeChildView(tab.view); } catch {}
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     if (this.selectedTabId === tab.id) {
@@ -963,7 +997,7 @@ class BrowserHost {
   closeTab(tabId) {
     const tab = this.turnTabs.get(tabId);
     if (!tab) throw new Error("Browser tab does not exist");
-    this.removeTurnTab(tab, true);
+    this.removeTurnTab(tab, true, "operator-tab-close");
     this.logger.info("browser.tab_closed", { tabId, traceId: tab.traceId, status: tab.status });
     return this.snapshot();
   }
@@ -1191,7 +1225,7 @@ class BrowserHost {
     // tabs leaked one slot per response/compaction until the five-tab safety limit made later
     // turns fail. The result already lives in Codex; release the browser document on every
     // terminal path while leaving other concurrently running tabs untouched.
-    this.removeTurnTab(tab, false);
+    this.removeTurnTab(tab, false, `turn-end-${status}`);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
     this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
   }
@@ -1606,6 +1640,7 @@ class BrowserHost {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     this.turnTabs.clear();
+    this.flightRecorder?.destroy();
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
 }

@@ -82,7 +82,7 @@ export function bridgeToResponsesSSE(
   toolNsMap?: Map<string, { namespace: string; name: string }>,
   freeformToolNames?: Set<string>,
   toolSearchToolNames?: Set<string>,
-  onCancel?: () => void,
+  onCancel?: (reason?: "terminal" | "client" | "stream-error") => void,
   heartbeatMs = 2_000,
   options?: {
     responseId?: string;
@@ -96,7 +96,11 @@ export function bridgeToResponsesSSE(
     compaction?: boolean;
     /** One-shot: first non-empty text/thinking/raw-reasoning delta observed (WP4 TTFT). */
     onFirstOutput?: () => void;
+    /** First SSE frame enqueue (including response.created), not every text delta. */
+    onFirstFrame?: () => void;
     onTerminal?: (status: ResponsesTerminalStatus) => void;
+    /** The terminal [DONE] marker was enqueued. */
+    onDone?: () => void;
     onCompletedResponse?: (response: Record<string, unknown>, providerState?: CodexProviderContinuationState) => void;
     /** Test seam for the platform-specific Bun stream transport. */
     streamPlatform?: NodeJS.Platform;
@@ -169,6 +173,7 @@ export function bridgeToResponsesSSE(
         activity = true;
         try {
           controller.enqueue(encoder.encode(sseEvent(name, { type: name, sequence_number: seq++, ...data })));
+          if (emittedFrames === 0) options?.onFirstFrame?.();
           emittedFrames++;
         } catch {
           closed = true;
@@ -178,6 +183,7 @@ export function bridgeToResponsesSSE(
         if (closed) return;
         try {
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          options?.onDone?.();
           emittedFrames++;
         } catch {
           closed = true;
@@ -743,7 +749,7 @@ export function bridgeToResponsesSSE(
             }
           }
           if (terminalEvent) {
-            onCancel?.();
+            onCancel?.("terminal");
             terminated = true;
             returnIterator();
             break;
@@ -763,7 +769,7 @@ export function bridgeToResponsesSSE(
             },
           });
           reportTerminal("failed");
-          onCancel?.();
+          onCancel?.("terminal");
           terminated = true;
           returnIterator();
         }
@@ -827,7 +833,7 @@ export function bridgeToResponsesSSE(
               },
             });
             reportTerminal("incomplete");
-            onCancel?.();
+            onCancel?.("terminal");
             terminated = true;
             returnIterator();
             emitDone();
@@ -866,7 +872,7 @@ export function bridgeToResponsesSSE(
     clientCancelled = true;
     closed = true;
     if (beat) clearInterval(beat);
-    onCancel?.();
+    onCancel?.("client");
     returnIterator();
   };
 
@@ -882,7 +888,7 @@ export function bridgeToResponsesSSE(
           if (closed) return;
           closed = true;
           if (beat) clearInterval(beat);
-          onCancel?.();
+          onCancel?.("stream-error");
           returnIterator();
           try { controller.error(error); } catch { /* already closed */ }
         });

@@ -4,6 +4,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { dirname } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import type { ChatGptTurnEnvironment } from "./environment";
+import { recordChatGptFlightEvent } from "../../observations/flight-recorder";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
   expiresAt?: number;
@@ -26,6 +27,7 @@ export interface BrokerToolResult {
 
 interface PendingInvocation {
   request: BrokerToolRequest;
+  queuedAt: number;
   resolve: (result: BrokerToolResult) => void;
   reject: (error: Error) => void;
 }
@@ -198,6 +200,15 @@ export class TurnBroker {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
+    recordChatGptFlightEvent({
+      category: "broker",
+      event: "broker-completed",
+      traceId: channel.traceId,
+      callId,
+      toolName: invocation.request.wireName,
+      elapsedMs: Date.now() - invocation.queuedAt,
+      unresolvedCount: channel.invocations.size,
+    });
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
@@ -434,8 +445,17 @@ export class TurnBroker {
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
-      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
+      const queuedAt = Date.now();
+      binding.channel.invocations.set(callId, { request: toolRequest, queuedAt, resolve: resolveInvoke, reject: rejectInvoke });
       binding.channel.queuedCallIds.push(callId);
+      recordChatGptFlightEvent({
+        category: "broker",
+        event: "broker-queued",
+        traceId: binding.channel.traceId,
+        callId,
+        toolName: wireName,
+        unresolvedCount: binding.channel.invocations.size,
+      });
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
       );
@@ -460,6 +480,18 @@ export class TurnBroker {
   private wakeToolWaiters(channel: TurnChannel): void {
     if (channel.queuedCallIds.length === 0 || channel.waiters.size === 0) return;
     const batch = this.takeQueued(channel);
+    for (const request of batch) {
+      const invocation = channel.invocations.get(request.callId);
+      recordChatGptFlightEvent({
+        category: "broker",
+        event: "broker-delivered",
+        traceId: channel.traceId,
+        callId: request.callId,
+        toolName: request.wireName,
+        ...(invocation ? { elapsedMs: Date.now() - invocation.queuedAt } : {}),
+        unresolvedCount: channel.invocations.size,
+      });
+    }
     console.info(
       `[chatgpt-web] broker trace=${channel.traceId} delivered calls=${batch.length} tools=${batch.map(request => request.wireName).join(",")}`,
     );
@@ -484,7 +516,18 @@ export class TurnBroker {
       waiter.reject(error);
     }
     channel.waiters.clear();
-    for (const invocation of channel.invocations.values()) invocation.reject(error);
+    for (const [callId, invocation] of channel.invocations) {
+      recordChatGptFlightEvent({
+        category: "broker",
+        event: "broker-revoked",
+        traceId: channel.traceId,
+        callId,
+        toolName: invocation.request.wireName,
+        elapsedMs: Date.now() - invocation.queuedAt,
+        errorClassification: "turn-binding-revoked",
+      });
+      invocation.reject(error);
+    }
     channel.invocations.clear();
     channel.queuedCallIds = [];
   }
