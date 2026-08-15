@@ -923,6 +923,73 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   ]);
 });
 
+test("connector selection re-resolves a detached menu row that vanishes between visibility-wait and click", async () => {
+  const calls: string[] = [];
+  let clickAttempt = 0;
+  let selected = false;
+  const detach = new Error("locator.click: Timeout 10000ms exceeded");
+  detach.name = "TimeoutError";
+  const selectedConnector = {
+    waitFor: async () => {
+      expect(selected).toBeTrue();
+      calls.push("selected");
+    },
+    count: async () => 1,
+  };
+  const appResult = {
+    waitFor: async () => { calls.push("menu-visible"); },
+    count: async () => 1,
+    click: async (options: { force: boolean; timeout: number }) => {
+      expect(options).toEqual({ force: true, timeout: 10_000 });
+      clickAttempt += 1;
+      calls.push(`click:${clickAttempt}`);
+      if (clickAttempt === 1) throw detach;
+      selected = true;
+    },
+  };
+  const selectedComposer = {
+    locator: () => ({ filter: () => selectedConnector }),
+  };
+  const initialComposer = {
+    fill: async () => { calls.push("clear"); },
+    focus: async () => { calls.push("focus"); },
+    pressSequentially: async (value: string) => {
+      expect(value).toBe("@c");
+      calls.push("type");
+    },
+  };
+  const page = {
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => selector.includes("__menu-item")
+      ? { filter: () => appResult }
+      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+  };
+  const diagnostics: string[] = [];
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown, captureDiagnostic?: (checkpoint: string) => Promise<void>): Promise<unknown>;
+  }).selectConnector;
+
+  const resolved = await selectConnector.call({
+    config: { appName: "Codex Native" },
+    connectorMentionTrigger: (ChatGptBrowserWorker.prototype as unknown as {
+      connectorMentionTrigger(): string;
+    }).connectorMentionTrigger,
+    connectorIsSelected: async () => selected,
+    selectedConnectorControl: () => selectedConnector,
+    activeComposer: async () => selected ? selectedComposer : initialComposer,
+  }, page, async checkpoint => { diagnostics.push(checkpoint); });
+
+  expect(resolved).toBe(selectedComposer);
+  expect(clickAttempt).toBe(2);
+  expect(calls).toEqual([
+    "clear",
+    "clear", "focus", "type", "menu-visible", "click:1",
+    "clear", "focus", "type", "menu-visible", "click:2",
+    "selected",
+  ]);
+  expect(diagnostics).toContain("connector-menu-click-detached");
+});
+
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
   const calls: Array<[string, string?]> = [];
   let selected = false;

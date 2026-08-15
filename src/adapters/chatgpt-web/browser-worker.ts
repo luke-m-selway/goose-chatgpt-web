@@ -1773,25 +1773,40 @@ export class ChatGptBrowserWorker {
           timeout: Math.min(2_500, Math.max(1, menuDeadline - Date.now())),
         });
         await captureDiagnostic?.("connector-menu-visible");
-        break;
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
         if (Date.now() >= menuDeadline) {
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
         }
+        continue;
+      }
+      if (await appResult.count() !== 1) {
+        throw new Error(
+          `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
+          + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
+        );
+      }
+      try {
+        // The popup's keyboard highlight belongs to the whole attachment menu, not necessarily the
+        // exact connector row resolved above. Activate only that unique row with a real Playwright
+        // pointer event; force bypasses transient popup movement without falling back to synthetic DOM input.
+        await appResult.click({ force: true, timeout: 10_000 });
+        break;
+      } catch (error) {
+        // ChatGPT can replace the mention popup's row nodes (async search-result settle) between the
+        // visibility wait above and this click dispatching. That leaves `force` clicking a target that
+        // is mid-detach, which surfaces as a click timeout rather than a stale-handle error. Re-resolve
+        // against the current DOM through the same trigger-and-wait path already proven above instead
+        // of failing on what is, from the popup's perspective, a single transient re-render.
+        if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+        if (Date.now() >= menuDeadline) {
+          await captureDiagnostic?.("connector-menu-click-exhausted");
+          throw error;
+        }
+        await captureDiagnostic?.("connector-menu-click-detached");
       }
     }
-    if (await appResult.count() !== 1) {
-      throw new Error(
-        `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
-        + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
-      );
-    }
-    // The popup's keyboard highlight belongs to the whole attachment menu, not necessarily the
-    // exact connector row resolved above. Activate only that unique row with a real Playwright
-    // pointer event; force bypasses transient popup movement without falling back to synthetic DOM input.
-    await appResult.click({ force: true, timeout: 10_000 });
     // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
     // again instead of returning the pre-selection locator, otherwise the real turn can focus a
     // detached/hidden editor even though verification just succeeded.
