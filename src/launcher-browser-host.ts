@@ -42,6 +42,18 @@ export interface LauncherTurnLifecycleState {
   reason?: string;
 }
 
+/**
+ * Launcher admission failure proven to occur before any turn-start control request is dispatched.
+ * A lost response after dispatch is deliberately not this type because Electron may already have
+ * created the lease.
+ */
+export class LauncherBrowserHostPreLeaseError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LauncherBrowserHostPreLeaseError";
+  }
+}
+
 function assertLoopbackEndpoint(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is missing`);
   let parsed: URL;
@@ -396,7 +408,14 @@ export async function notifyLauncherTurn(
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
 ): Promise<{ surfaceId?: string; lifecycle?: LauncherTurnLifecycleState }> {
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  let descriptor: LauncherBrowserHostDescriptor;
+  try {
+    descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  } catch (error) {
+    if (activity.phase !== "start") throw error;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    throw new LauncherBrowserHostPreLeaseError(cause.message, { cause });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

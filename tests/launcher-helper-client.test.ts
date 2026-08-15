@@ -23,6 +23,46 @@ test("the production browser helper heartbeats for the full active run", () => {
   expect(firstHeartbeat).toBeLessThan(browserRun);
 });
 
+test("helper startup classifies a missing descriptor as retryable only before run dispatch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "goose-launcher-helper-missing-descriptor-"));
+  roots.push(root);
+  const descriptorPath = join(root, "missing-launcher.json");
+  const client = new LauncherBrowserHelperClient({
+    appName: "Goose Native",
+    browserHost: "launcher",
+    browserHostDescriptorPath: descriptorPath,
+    storageStatePath: join(root, "unused-state.json"),
+    chromeExecutablePath: join(root, "unused-chrome"),
+    turnTimeoutMs: 60_000,
+    headed: true,
+    autoApproveToolCalls: false,
+  });
+  try {
+    const failure = await client.run({
+      traceId: "prelease-missing-1",
+      modelId: "gpt-5.6-sol",
+      reasoning: "high",
+      capabilities: { localToolsEnabled: false, proAvailable: false },
+      prepare: async () => ({ text: "inspect", images: [], release() {} }),
+      onTextDelta() {},
+    }).then(() => undefined, error => error);
+    expect(failure).toBeInstanceOf(ChatGptWebAdapterError);
+    expect(failure).toMatchObject({
+      status: 503,
+      errorType: "server_error",
+      code: "chatgpt_browser_host_unavailable",
+      retryable: true,
+      message: `Launcher browser host is unavailable: descriptor is missing at ${descriptorPath}`,
+    });
+    expect((failure as Error).cause).toBeInstanceOf(Error);
+    expect(((failure as Error).cause as Error).message).toBe(
+      `Launcher browser host is unavailable: descriptor is missing at ${descriptorPath}`,
+    );
+  } finally {
+    await client.close();
+  }
+});
+
 test("Bun daemon streams a prepared browser turn through the persistent Node helper", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));
   roots.push(root);

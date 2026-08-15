@@ -1,7 +1,7 @@
 # ChatGPT-Web hardening plan
 
 Status: **canonical planning / diagnosis register**  
-Updated: **2026-08-15**  
+Updated: **2026-08-16**
 Primary runtime workstream: **PR #31 — `fix/electron-native-liveness`**  
 Related design tracks: **PR #32 — large-context continuation**, **PR #33 — provider-demand BrowserHost lifecycle**
 
@@ -12,13 +12,12 @@ This document is the canonical evidence-driven hardening register for the curren
 ### Repository / deployed source reconciliation
 
 - Local branch: `fix/electron-native-liveness`.
-- Local HEAD: `a98ab0d342623a562ca71a847aa3ebf6d3dd3032` — `fix(chatgpt-web): resolve connector mention by full name, not first letter`.
-- PR #31 remote head: the same `a98ab0d...` revision.
-- Worktree at reconnaissance start: no tracked modifications; only the protected pre-existing untracked files `scripts/open-manual-browser.ts` and `scripts/proof-mcp-server.ts`.
-- The current daemon launchd definition runs `/Users/luke/Documents/goose-chatgpt-web/src/cli.ts serve` through this worktree's Bun.
-- The current BrowserHost process runs Electron from `/Users/luke/Documents/goose-chatgpt-web/launcher`; its descriptor points at this worktree's `.launcher-runtime/browser-helper.cjs`.
-- Current daemon / BrowserHost processes were started on 2026-08-15 at approximately 23:29 CEST. The latest passive connector proof trace `5acef0a21af2` began at `2026-08-15T21:31:01Z`, leased one launcher surface, selected/sent successfully, performed one Goose Native `shell` call, and completed cleanly.
-- Therefore the runtime currently in use is sourced from the PR #31 worktree at the current head, not merely the older documented `7f99f187...` checkpoint. Older PR prose remains historical evidence only.
+- CGW-003 reconciliation start HEAD: `73853f8e8bedacbf39fb88d296144e01b1e53889` — `docs(chatgpt-web): mark CGW-002 FIXED / OBSERVE after activation proof`.
+- PR #31 remote head at that reconciliation point: the same `73853f8...` revision.
+- Worktree at CGW-003 reconciliation start: no tracked modifications; only the protected pre-existing untracked files `scripts/open-manual-browser.ts` and `scripts/proof-mcp-server.ts`.
+- Read-only runtime reconciliation on 2026-08-16 found launchd daemon pid `16165` and tunnel pid `15665` running from the current project/runtime layout; BrowserHost pid `15779` runs Electron from `/Users/luke/Documents/goose-chatgpt-web/launcher`.
+- The active BrowserHost descriptor at `/Users/luke/.goose-chatgpt-web-dev/runtime/launcher-browser.json` points at this worktree's `.launcher-runtime/browser-helper.cjs` (descriptor `createdAt=2026-08-15T23:11:12.504Z`). No lifecycle action was performed during CGW-003 work.
+- The live processes predate the CGW-003 working-tree implementation below, so they must not be treated as activation evidence for it. Older PR/runtime snapshots remain historical evidence only.
 
 ### Canonical log locations, derived from source / plists
 
@@ -107,22 +106,22 @@ This supports PR #32's large-context concern as a strong correlated risk, but no
 ### CGW-003 — Pre-lease launcher availability failures can poison exact-key settled replay
 
 - **Class:** confirmed-defect
-- **Final classification:** READY-FOR-FIX
+- **Final classification:** IMPLEMENTED / AWAITING INDEPENDENT REVIEW + ACTIVATION
 - **User impact:** a transient BrowserHost descriptor/readiness failure can settle as a generic non-retryable error and remain cached for the exact execution key, so a later legitimate retry can replay the old error after BrowserHost health has returned.
 - **Frequency / severity:** confirmed in the 2026-08-14 recovery sequence; severe when it occurs because healthy runtime restoration does not clear the logical execution's cached failure.
 - **Exact supporting evidence:** ecological supplement records `Launcher browser host is unavailable: descriptor is missing ...`; passive `55d7c2bed175` shows immediate failure without a surface lease followed by repeated same-key failures after runtime restoration, while fresh `70b87737e109` leased and succeeded. Source: `src/launcher-browser-host.ts` emits plain `Error` for missing/stale/invalid descriptor/process/readiness conditions. `src/adapters/chatgpt-web/index.ts` only retires a turn session automatically when the thrown value is a retryable `ChatGptWebAdapterError`; generic errors are cancelled but remain eligible for settled replay. The retry circuit treats unclassified generic errors as terminal/open.
 - **Current root-cause confidence:** high for the stale replay mechanism; the exact first missing-descriptor event is documented rather than body-recorded because the recorder intentionally stores no request body.
 - **Known facts:** launcher absence before a lease is an infrastructure availability failure, not a model/user error; bounded retry circuit already limits retryable failures to one recovery browser attempt.
-- **Unknowns:** which narrow set of launcher pre-lease failures should share one public error code; this is an implementation naming choice, not a behavioral uncertainty.
+- **Unknowns:** none material to the bounded implementation. The stable public code is `chatgpt_browser_host_unavailable`; failures after a lease-capable `/v1/turn/start` request is dispatched remain deliberately outside that classification because lost-response state is ambiguous.
 - **Overlap / dependency:** CGW-002 lets this poison cross fresh sessions; after CGW-002 it can still poison an exact legitimate retry within one session, so it remains independently real.
-- **Current implementation / fix status:** not fixed at `a98ab0d`.
+- **Current implementation / fix status:** implemented on PR #31 for independent review, not yet activated. Helper startup failures are typed only before any `run` frame is dispatched. In the helper-side launcher path, descriptor failure is tagged as authoritative pre-lease evidence only when descriptor validation fails before the `/v1/turn/start` control POST; failures after that POST remain generic/conservative. The resulting `chatgpt_browser_host_unavailable` error reuses existing retryable-session retirement and the existing two-attempt standalone retry circuit, while preserving the launcher message and the same-process causal chain.
 - **Activated runtime contains relevant repair:** NO.
 - **Can existing evidence fully specify a fix?** YES.
-- **Smallest proposed repair:** at the launcher-helper/adapter boundary, wrap the explicit pre-lease BrowserHost-unavailable/readiness family in a structured `ChatGptWebAdapterError` such as `chatgpt_browser_host_unavailable`, `retryable: true`, preserving the original causal message/cause. Reuse the existing retryable-session retirement path; do not broadly reinterpret arbitrary browser/UI errors and do not enlarge retry budgets.
-- **Required deterministic regression tests:** fake first pre-lease descriptor-unavailable error then success; verify the exact-key session is retired and the second request starts a fresh runtime. Verify two consecutive failures consume only the existing bounded retry budget and then open the circuit. Verify unrelated generic/non-retryable errors remain settled/replayed as before. Verify original launcher error text is preserved.
-- **Out-of-band runtime testing required:** NO before implementation; later activation proof may stop at passive observation of a natural recovery, rather than deliberately removing the active descriptor.
+- **Smallest proposed repair:** implemented at the existing launcher-helper/adapter boundaries: authoritatively pre-lease helper startup and descriptor-admission failures become `ChatGptWebAdapterError(code=chatgpt_browser_host_unavailable, retryable=true)`. No new retry loop or session state was added; the existing retryable-session retirement path removes the failed exact-key session before a later legitimate retry, and the existing retry circuit still permits at most two provider/browser attempts. Post-dispatch launcher-control failures and unrelated generic browser/UI failures keep their prior conservative semantics.
+- **Required deterministic regression tests:** implemented hermetically: (1) a real missing launcher descriptor fails before helper dispatch, then a synthetic recovered helper on the exact same execution key is entered and succeeds; a third exact retry replays that successful settlement without another provider start; (2) two missing-descriptor attempts consume only the pre-existing two-attempt budget and the third is blocked by the existing circuit; (3) generic/ambiguous browser failures remain settled exact-key replay state; (4) a descriptor failure before `/v1/turn/start` is explicit pre-lease evidence, while an HTTP failure after the start request reaches the control server is not; (5) causal launcher text is retained end-to-end, with `Error.cause` retained at same-process classification boundaries.
+- **Out-of-band runtime testing required:** NO for implementation. Activation/live qualification remains intentionally not run in this change; later proof should use passive/natural recovery evidence rather than deliberately removing the active descriptor.
 - **Correct PR/workstream:** PR #31.
-- **Recommended next action:** implement after CGW-002.
+- **Recommended next action:** fresh ChatGPT-Web review of the scoped implementation/tests; only after review should a separate activation/live-qualification step occur.
 
 ### CGW-004 — Same-Goose-session distinct executions can overlap and amplify failure surfaces
 

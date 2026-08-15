@@ -42,13 +42,14 @@ import {
   connectLauncherBrowserHost,
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
+  LauncherBrowserHostPreLeaseError,
   notifyLauncherTurn,
   type LauncherTurnLifecycleState,
 } from "../../launcher-browser-host";
 import { resolveChatGptWebContextLimits } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserHostUnavailableError } from "./adapter-error";
 import {
   CHATGPT_BROWSER_CONTROL_CLEANUP_TIMEOUT_MS,
   CHATGPT_BROWSER_DIAGNOSTIC_TIMEOUT_MS,
@@ -2297,11 +2298,22 @@ export class ChatGptBrowserWorker {
       }
     }
 
-    const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-      phase: "start",
-      traceId: turn.traceId,
-      helperPid: process.pid,
-    });
+    let lease: Awaited<ReturnType<typeof notifyLauncherTurn>>;
+    try {
+      lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+        phase: "start",
+        traceId: turn.traceId,
+        helperPid: process.pid,
+      });
+    } catch (error) {
+      // notifyLauncherTurn reads/validates the descriptor before issuing the control POST. Only
+      // that explicit error proves no lease-capable request crossed the BrowserHost boundary. A
+      // later control error remains generic because Electron may already have leased a surface.
+      if (error instanceof LauncherBrowserHostPreLeaseError) {
+        throw chatGptBrowserHostUnavailableError(error);
+      }
+      throw error;
+    }
     const surfaceId = lease.surfaceId;
     if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
     let nativeLifecycle = lease.lifecycle;

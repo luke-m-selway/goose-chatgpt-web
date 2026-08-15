@@ -12,6 +12,7 @@ import {
   LAUNCHER_AUTOMATION_VIEWPORT,
   LAUNCHER_BROWSER_HOST_KIND,
   LAUNCHER_MIN_LAYOUT_VIEWPORT,
+  LauncherBrowserHostPreLeaseError,
   ensureLauncherAutomationViewport,
   inspectLauncherBrowserHost,
   launcherAutomationViewportRequired,
@@ -69,6 +70,51 @@ test("launcher descriptor is owner-only, loopback-only, and process-bound", () =
   if (process.platform !== "win32") {
     chmodSync(path, 0o644);
     expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unsafe permissions");
+  }
+});
+
+test("launcher start descriptor failures are explicit authoritative pre-lease evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-launcher-missing-descriptor-"));
+  roots.push(root);
+  const path = join(root, "launcher-browser.json");
+  const failure = await notifyLauncherTurn(path, {
+    phase: "start",
+    traceId: "missing-start-1",
+    helperPid: process.pid,
+  }).then(() => undefined, error => error);
+  expect(failure).toBeInstanceOf(LauncherBrowserHostPreLeaseError);
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toBe(`Launcher browser host is unavailable: descriptor is missing at ${path}`);
+  expect((failure as Error).cause).toBeInstanceOf(Error);
+});
+
+test("launcher start control failures after request dispatch stay ambiguous rather than pre-lease", async () => {
+  let receivedStart = false;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    receivedStart = request.url === "/v1/turn/start";
+    response.writeHead(503, { "content-type": "text/plain" });
+    response.end("synthetic control failure");
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile("http://127.0.0.1:39110", `http://127.0.0.1:${address.port}`);
+    const failure = await notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "ambiguous-start-1",
+      helperPid: process.pid,
+    }).then(() => undefined, error => error);
+    expect(receivedStart).toBe(true);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(LauncherBrowserHostPreLeaseError);
+    expect(String(failure)).toContain("Launcher browser control channel failed: HTTP 503: synthetic control failure");
+  } finally {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }
 });
 

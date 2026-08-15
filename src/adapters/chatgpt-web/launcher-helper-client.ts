@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserHostUnavailableError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 
@@ -133,7 +133,14 @@ export class LauncherBrowserHelperClient {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const prepared = await turn.prepare();
     try {
-      await this.ensureChild();
+      try {
+        // Helper startup completes before a `run` frame can be dispatched, so any failure here is
+        // authoritatively pre-lease. Reuse the adapter's existing retry/retirement contract rather
+        // than teaching the session registry another BrowserHost-specific state.
+        await this.ensureChild();
+      } catch (error) {
+        throw chatGptBrowserHostUnavailableError(error);
+      }
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       return await new Promise<string>((resolveResult, rejectResult) => {
         if (this.pending.has(turn.traceId)) {
