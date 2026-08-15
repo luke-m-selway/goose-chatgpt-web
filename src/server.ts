@@ -330,11 +330,13 @@ function standaloneAssistantTextContent(value: unknown): boolean {
  * requires Codex's own turn/thread metadata and fails closed for a plain Goose request).
  *
  * Identity defaults to a deterministic digest of the input prefix ending at the latest user
- * message, not a fresh random value. Because Goose resends full history, a byte-identical retry of
- * the same logical turn — or a duplicate HTTP POST from a client-side retry — collapses onto the
- * same execution key instead of opening a second browser tab for work that is already in flight or
- * already answered. A genuinely new user message changes the prefix and therefore always gets a
- * fresh identity, i.e. a fresh browser turn.
+ * message, not a fresh random value. When a trusted Goose session namespace is available, that
+ * existing content digest is namespaced by the session before becoming the synthetic turn ID, so
+ * fresh Goose sessions cannot collide merely because they sent identical content. Without a
+ * namespace, the historical content-only digest is retained for compatibility. Because Goose
+ * resends full history, a byte-identical retry of the same logical turn — or a duplicate HTTP POST
+ * from a client-side retry — still collapses onto the same execution key. A genuinely new user
+ * message changes the prefix and therefore gets a fresh identity, i.e. a fresh browser turn.
  */
 /**
  * Tag the input item at `latestUserIndex` with deterministic synthetic thread/turn identity so the
@@ -364,11 +366,22 @@ function tagStandaloneIdentity(
   input: unknown[],
   latestUserIndex: number,
   identity: string | undefined,
+  identityNamespace: string | undefined,
 ): unknown {
-  const resolvedIdentity = identity ?? createHash("sha256")
-    .update(JSON.stringify(standaloneIdentityPrefix(input, latestUserIndex)))
-    .digest("hex")
-    .slice(0, 32);
+  const resolvedIdentity = identity ?? (() => {
+    const contentIdentity = createHash("sha256")
+      .update(JSON.stringify(standaloneIdentityPrefix(input, latestUserIndex)))
+      .digest("hex")
+      .slice(0, 32);
+    return identityNamespace === undefined
+      ? contentIdentity
+      : createHash("sha256")
+        .update(identityNamespace)
+        .update("\0")
+        .update(contentIdentity)
+        .digest("hex")
+        .slice(0, 32);
+  })();
   const turnId = `standalone_${resolvedIdentity}`;
   const taggedInput = input.map((item, index) => index === latestUserIndex ? {
     ...plainObject(item),
@@ -392,6 +405,7 @@ export function prepareStandaloneTextRequest(
   raw: unknown,
   config: AppConfig,
   identity?: string,
+  identityNamespace?: string,
 ): unknown {
   if (!config.standalone || config.mode !== "browser-only") return raw;
   const body = plainObject(raw);
@@ -419,7 +433,7 @@ export function prepareStandaloneTextRequest(
     if (item.role === "user") latestUserIndex = index;
   }
   if (latestUserIndex < 0) return raw;
-  return tagStandaloneIdentity(body, input, latestUserIndex, identity);
+  return tagStandaloneIdentity(body, input, latestUserIndex, identity, identityNamespace);
 }
 
 function standaloneAllowedToolItem(item: Record<string, unknown>): boolean {
@@ -442,6 +456,7 @@ export function prepareStandaloneToolRequest(
   raw: unknown,
   config: AppConfig,
   identity?: string,
+  identityNamespace?: string,
 ): unknown {
   if (!config.standalone || config.mode !== "full") return raw;
   const body = plainObject(raw);
@@ -470,7 +485,7 @@ export function prepareStandaloneToolRequest(
     if (item.role === "user") latestUserIndex = index;
   }
   if (latestUserIndex < 0) return raw;
-  return tagStandaloneIdentity(body, input, latestUserIndex, identity);
+  return tagStandaloneIdentity(body, input, latestUserIndex, identity, identityNamespace);
 }
 
 export async function responseRequest(
@@ -502,8 +517,14 @@ export async function responseRequest(
   const requestedPreviousResponseId = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
+  const trustedAgentSessionId = req.headers.get("agent-session-id")?.trim() || undefined;
   const stockGooseCompaction = config.standalone === true && isStockGooseCompactionRequestBody(raw);
-  const standalonePrepared = prepareStandaloneToolRequest(prepareStandaloneTextRequest(raw, config), config);
+  const standalonePrepared = prepareStandaloneToolRequest(
+    prepareStandaloneTextRequest(raw, config, undefined, trustedAgentSessionId),
+    config,
+    undefined,
+    trustedAgentSessionId,
+  );
   const expanded = expandPreviousResponseInput(standalonePrepared);
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
@@ -549,7 +570,6 @@ export async function responseRequest(
     identity = { executionKey: `unbound:${fallback}`, executionKeyHash: fallback, traceId: fallback.slice(0, 12) };
   }
   const requestStartedAt = Date.now();
-  const trustedAgentSessionId = req.headers.get("agent-session-id")?.trim() || undefined;
   recordChatGptFlightEvent({
     category: "request",
     event: "request-accepted",
