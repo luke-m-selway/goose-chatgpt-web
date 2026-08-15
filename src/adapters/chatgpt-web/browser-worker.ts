@@ -867,7 +867,7 @@ class ChatGptBrowserDiagnostics {
             effortControls: rows(effortControlSelector, 10),
             effortItems: rows(effortItemSelector, 20),
             menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
-            connectorRows: rows('.__menu-item[tabindex="0"]', 40),
+            connectorRows: rows('.__menu-item[tabindex="0"]:not([data-sidebar-item])', 40),
             overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
             turns: {
               user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"]').length,
@@ -1720,12 +1720,16 @@ export class ChatGptBrowserWorker {
   }
 
   /**
-   * ChatGPT's `@` mention menu filters candidate connectors by the characters typed after `@`.
-   * The trigger must therefore track the actually configured connector name (upstream hard-coded
-   * "@c" for its own "Codex Native2" identity) rather than assume any particular fork's name.
+   * A single-character trigger (e.g. "@g") asks ChatGPT's own fuzzy mention search to rank the
+   * exact configured connector among every candidate that shares that first letter — sidebar
+   * navigation aside, the connector catalog alone now also holds "Google Calendar", "Google
+   * Drive", and "Goose Control" alongside "Goose Native". As that catalog grows, a short trigger
+   * can rank/paginate the exact connector out of the rendered row set even though it exists.
+   * Typing the complete configured name instead drives ChatGPT's own search down to the one
+   * connector whose name exactly matches, which is what actually resolves reliably.
    */
   private connectorMentionTrigger(): string {
-    return `@${this.config.appName.trim().charAt(0).toLowerCase()}`;
+    return `@${this.config.appName.trim()}`;
   }
 
   private async connectorMentionFailure(menuRows: Locator, triggerAttempts: number): Promise<string> {
@@ -1749,7 +1753,12 @@ export class ChatGptBrowserWorker {
       return composer;
     }
 
-    const menuRows = page.locator('.__menu-item[tabindex="0"]');
+    // ChatGPT's left sidebar (chat history, the account/profile button) shares the same
+    // `.__menu-item[tabindex="0"]` row class as the mention popup, and stays in the DOM the whole
+    // time the popup is open. Excluding `[data-sidebar-item]` rows keeps both connector resolution
+    // and the failure diagnostics below scoped to the actual mention catalog instead of dumping
+    // unrelated navigation/history rows as if they were connector candidates.
+    const menuRows = page.locator('.__menu-item[tabindex="0"]:not([data-sidebar-item])');
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
