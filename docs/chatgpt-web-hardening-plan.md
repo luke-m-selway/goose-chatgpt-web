@@ -86,23 +86,23 @@ This supports PR #32's large-context concern as a strong correlated risk, but no
 
 ### CGW-002 — Standalone execution identity is content-derived across fresh Goose sessions
 
-- **Class:** confirmed-defect
-- **Final classification:** READY-FOR-FIX
+- **Class:** fixed-observe
+- **Final classification:** FIXED / OBSERVE
 - **User impact:** two genuinely fresh Goose chats that send the same normalized prompt can be treated as one ChatGPT-Web execution. A settled success/error can be replayed into the wrong logical Goose session without opening a browser surface.
 - **Frequency / severity:** deterministic when normalized request content collides; severe because it breaks execution identity and contaminates later diagnosis.
 - **Exact supporting evidence:** `docs/chatgpt-web-ecological-supplement-2026-08-14.md`; PR #31 discussion; passive trace `55d7c2bed175` was reused by agent sessions `20260814_28`, `_29`, `_30`, `_31`, `_32`, `_35`, `_36` with the same execution-key hash and no new browser lease on later requests; distinct prompt/session `_34` used trace `70b87737e109`, leased a surface, and completed. Source: `src/server.ts` `tagStandaloneIdentity()` computes `standalone_<sha256(normalized input prefix)>` and `responseRequest()` does not namespace this synthetic identity with the already-trusted `agent-session-id` header. `tests/server-standalone.test.ts` currently encodes byte-identical content reuse without distinguishing client session scope.
 - **Current root-cause confidence:** high.
 - **Known facts:** exact HTTP retries and tool-result rounds within one logical Goose execution must remain idempotent; fresh Goose sessions must not collide merely because prompt text is equal; volatile `<turn-context>` remains intentionally excluded.
 - **Unknowns:** none material to the narrow repair.
-- **Overlap / dependency:** explains the cross-session stale replay portion of execution-identity incidents. It is distinct from CGW-003 (a transient error being retained within a legitimate exact execution) and should be fixed first because it contaminates evidence for all later work.
-- **Current implementation / fix status:** not fixed at `a98ab0d`.
-- **Activated runtime contains relevant repair:** NO.
-- **Can existing evidence fully specify a fix?** YES.
-- **Smallest proposed repair:** add an optional trusted standalone identity namespace derived from `agent-session-id`; compute the synthetic identity from `(trusted session namespace, normalized standalone identity prefix)` when that header is present. Do **not** use `agent-session-id` alone, because multiple user turns within one Goose session must remain distinct. Preserve the current content-only digest as the compatibility fallback for standalone clients that supply no session header.
+- **Overlap / dependency:** explains the cross-session stale replay portion of execution-identity incidents. It is distinct from CGW-003 (a transient error being retained within a legitimate exact execution).
+- **Current implementation / fix status:** repaired by `cd21c604` (namespace standalone identity by Goose session), following independent ChatGPT-Web semantic review (verdict PASS).
+- **Activated runtime contains relevant repair:** YES, confirmed by out-of-band activation on 2026-08-16.
+- **Can existing evidence fully specify a fix?** YES; repair implemented per the packet below.
+- **Smallest proposed repair:** implemented as an optional trusted standalone identity namespace derived from `agent-session-id`; the synthetic identity is computed from `(trusted session namespace, normalized standalone identity prefix)` when that header is present. `agent-session-id` alone is not used, since multiple user turns within one Goose session must remain distinct. The content-only digest remains the compatibility fallback for standalone clients that supply no session header.
 - **Required deterministic regression tests:** (1) same normalized body + different `agent-session-id` => different synthetic turn/execution keys; (2) same normalized body + same `agent-session-id` => same key; (3) same session + tool-result continuation for the same turn => same key; (4) same session + new latest user message => different key; (5) volatile `<turn-context>` differences remain ignored; (6) no-header compatibility retains current byte-identical retry collapse.
-- **Out-of-band runtime testing required:** NO before implementation. Activation proof should later use two fresh ordinary Goose sessions with intentionally identical prompt text and verify distinct trace IDs/surfaces.
+- **Out-of-band runtime testing required:** DONE 2026-08-16. Canonical `codex-chatgpt-web lifecycle restart` activated `cd21c604` (fresh daemon pid, fresh tunnel pid, fresh BrowserHost pid; 0/0 active HTTP/browser turns before and after). Two sequential, genuinely separate, persisted ordinary Goose sessions (`20260815_38` / `cgw002-proof-a` and `20260815_39` / `cgw002-proof-b`) sent byte-identical prompt text instructing a Goose Native shell call followed by an exact reply. Both produced the required visible result and completed. Flight-recorder evidence: session A trace `b879417c7eb7` / execution-key hash `b879417c7eb7c7ac...02ea12`, surface `PEzf4rxdSOXGjeoEH320EgWAbdc3hi3a`; session B trace `3a8d671ce352` / execution-key hash `3a8d671ce35227ce...8075ab`, surface `OxY-OM-wOQKFUQ4TeY9xKwgZj6gTfW0w` — cross-session trace/execution identities differ and each leased its own live BrowserHost surface (no settled-state replay). Within each session, the initial tool-request round and the `function_call_output` continuation shared the same traceId and executionKeyHash (verified from each trace's `events.jsonl`), confirming stable same-session logical execution identity. Final health after proof: 0/0 active HTTP/browser turns, daemon/tunnel/BrowserHost healthy.
 - **Correct PR/workstream:** PR #31.
-- **Recommended next action:** first implementation packet in this plan.
+- **Recommended next action:** observe only; reopen only with a post-`cd21c604` trace that violates the repaired contract (cross-session collision or within-session identity drift).
 
 ### CGW-003 — Pre-lease launcher availability failures can poison exact-key settled replay
 
@@ -387,7 +387,7 @@ Symptoms and PR comments should map to the register as follows rather than becom
 
 ## 4. READY-FOR-FIX queue
 
-### RF-1 / CGW-002 — Namespace standalone execution identity by trusted Goose session
+### RF-1 / CGW-002 — Namespace standalone execution identity by trusted Goose session — DONE, see CGW-002 (FIXED / OBSERVE)
 
 **Implementation packet**
 
