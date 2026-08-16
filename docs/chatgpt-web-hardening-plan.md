@@ -167,25 +167,56 @@ This supports PR #32's large-context concern as a strong correlated risk, but no
 - **Correct PR/workstream:** PR #31 operational hardening or a tightly scoped follow-up.
 - **Recommended next action:** perform OOB-005 at the next genuine abandoned retained-turn incident; do not run a synthetic spinout merely to exercise the skill.
 
-### CGW-006 — Outer Responses caller cancels active streams at approximately 600 seconds
+### CGW-006 — Goose OpenAI provider total-request deadline cancels active Responses streams at 600 seconds
 
-- **Class:** likely-defect
-- **Final classification:** NEEDS-OUT-OF-BAND-TEST; MUST RETURN TO FRESH PLANNER
-- **User impact:** Goose can report a network/stream decode failure while the BrowserHost/model turn is still alive and useful work has been progressing, orphaning the result and encouraging a new provider attempt.
-- **Frequency / severity:** at least three client-cancelled finalized traces in the current corpus; historical reports cluster near 603–606 seconds. Severe on long turns.
-- **Exact supporting evidence:** `docs/chatgpt-web-network-error-retry-lineage-evidence.md`; passive trace `4c995549362e` records request signal abort/client cancellation at ~599.9s while the BrowserHost turn continued to ~1,270.6s; trace `022984c74576` records a request signal abort at ~600.0s during a much longer browser/tool turn. Recorder aggregate has 97 normal body closes and 3 client cancellations, with **no** finalized daemon-side `body-error`. BrowserHost heartbeats continue up to the cancellation boundary. `src/server.ts` records the request's `AbortSignal` and propagates caller cancellation to the adapter.
-- **Current root-cause confidence:** high that the daemon is being cancelled by its caller around 600s; low on the exact layer producing the user-visible “Stream decode error” and whether that layer is Goose's HTTP client, a provider wrapper, or another outer transport component.
-- **Known facts:** SSE heartbeat activity does not prevent this approximately total-duration boundary. Increasing ChatGPT/browser stage timeouts would not address it.
-- **Unknowns:** exact owner/configuration of the ~600s deadline and the correct contract for turns that can legitimately stay in one Responses stream longer than it.
-- **Overlap / dependency:** can trigger CGW-004 amplification when Goose starts a later request while the browser attempt remains useful/alive. Distinct from BrowserHost liveness.
-- **Current implementation / fix status:** not fixed in this repo; fix placement not yet established.
-- **Activated runtime contains relevant repair:** NO known repair.
-- **Can existing evidence fully specify a fix?** NO. Do not globally raise timeout/retry budgets.
-- **Smallest proposed repair if YES:** N/A until owner is identified.
-- **Required deterministic regression tests:** once owner is known, local mock Responses stream with continuous SSE activity across the discovered deadline; verify intended caller behavior and causal error preservation without touching ChatGPT.
-- **Out-of-band runtime testing required:** YES, but it can be completely out-of-band from ChatGPT-Web BrowserHost; packet OOB-006 below.
-- **Correct PR/workstream:** likely Goose/provider-client boundary unless the experiment proves a repo-local transport bug. Keep out of Goose Control.
-- **Recommended next action:** source-inspect the active Goose HTTP provider deadline, then use a local heartbeat mock only if source inspection is inconclusive; return result to a fresh planner before changing behavior.
+- **Class:** confirmed upstream provider-client defect
+- **Final classification:** OWNER-IDENTIFIED; SOURCE-FIRST STOP MET; IMPLEMENTATION NOT RUN
+- **User impact:** Goose can report `Network error: Stream decode error: error decoding response body` while an otherwise healthy ChatGPT-Web browser turn is still active. The transport failure terminates the Goose reply loop and asks the user to resend even though the failure was caused by a caller-side elapsed-time deadline rather than a daemon/body-decode defect.
+- **Frequency / severity:** three natural finalized traces are now source-correlated to the same 600-second clock. Severe for long individual provider responses and for long logical tasks that eventually contain one provider response lasting at least 600 seconds.
+
+**CONFIRMED**
+
+- The installed Goose is `1.45.0`. Its active provider is `custom_chatgpt_web__local_1`, a custom provider with `engine: "openai"`, `base_url: "http://127.0.0.1:17841"`, `base_path: "v1/responses"`, streaming enabled, and `timeout_seconds: null`.
+- Exact installed-source owner: Goose tag `v1.45.0` (`4dc0420f5704a92806c6628c8f0a3497d7a88759`), `crates/goose-providers/src/openai.rs`. The custom OpenAI provider defines `DEFAULT_TIMEOUT_SECONDS: u64 = 600`, resolves `config.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)`, and passes that duration to `ApiClient::with_timeout_and_tls(...)`.
+- Exact HTTP-client breadcrumb: Goose `crates/goose-providers/src/api_client.rs`. `ApiClient::with_timeout_and_tls(...)` constructs reqwest with `Client::builder().timeout(timeout)` and preserves the same total timeout when rebuilding the client.
+- Exact timer semantics: Goose `v1.45.0` resolves `reqwest` `0.13.4`. In that reqwest source, `ClientBuilder::timeout(...)` is explicitly a **total request deadline** from the start of connecting until the response body has finished. `TotalTimeoutBody` explicitly does **not** reset on each response-body chunk. Reqwest separately exposes `read_timeout(...)`, whose clock does reset after each successful read; Goose is not using that mechanism for this 600-second setting.
+- The 600-second clock therefore starts for each new Goose HTTP provider request when that request starts connecting. It does not reset on SSE activity, heartbeat frames, browser progress, or any other activity within that HTTP response. A tool result/provider continuation can lead Goose to start a **new** HTTP request, which gets a fresh 600-second deadline; that is a new request, not an activity reset of the previous deadline.
+- The repo daemon does not create the 600-second timer. `src/server.ts` receives the Bun HTTP request's `req.signal`; when the caller disconnects it records `request-signal-abort`, records `cancellationSource=request-signal`, and only then propagates that cancellation through its own adapter `AbortController`. `HttpTurnCounter` consequently records `client-cancellation`. The recorder event is the downstream observation of Goose/reqwest ending the HTTP body, not the source of the timer.
+- Goose ACP is not the 600-second owner. `crates/goose/src/acp/server.rs` creates an explicit `CancellationToken` for a prompt run and passes it into `agent.reply(...)`; the prompt stream is consumed without a matching 600-second timeout wrapper. A source search found no 600-second ACP/Desktop prompt deadline.
+- Goose's current upstream `origin/main` at `3810898a7447ec3299be72e223d3570a7aabf0ab` still carries the same 600-second OpenAI/default provider timeout construction, so this is not already repaired upstream.
+- The user-visible `Stream decode error` is an outer error-classification artifact. `stream_responses_compat(...)` consumes `response.bytes_stream()` and maps a body-stream failure through the generic streaming decoder; `ProviderError::stream_decode_error(...)` renders it as `Network error: Stream decode error: ...`. That text does not establish a daemon decoder defect.
+
+Natural case reconstruction:
+
+| Goose session | trace | failed Responses request start | request-signal abort | last successful SSE/body activity | prior broker work | browser/daemon settlement |
+| --- | --- | --- | --- | --- | --- | --- |
+| `20260814_24` | `4c995549362e` | `2026-08-14T17:33:00.023Z` | `599911 ms` at `17:42:59.933Z` | SSE enqueue `598860 ms`; body chunk `598869 ms`; 239 frames / 232 heartbeats | 42 broker calls completed, 0 unresolved; last completion `17:33:00.023Z` | request body settled as `client-cancellation` at `599912 ms`; adapter `AbortError`; failed surface released `turn-end-aborted` ~3.2 s later; no abnormal process event |
+| `20260815_25` | `022984c74576` | `2026-08-15T19:25:20.371Z` | `600013 ms` at `19:35:20.384Z` | SSE enqueue `598247 ms`; body chunk `598251 ms`; 239 frames / 238 heartbeats | 37 broker calls completed, 0 unresolved; last completion `19:25:20.371Z` | request body settled as `client-cancellation` at `600051 ms`; adapter `AbortError`; failed surface released `turn-end-aborted` ~2.2 s later; no abnormal process event |
+| `20260816_11` | `ea9d46d1a1b7` | `2026-08-16T11:22:52.090Z` | `599958 ms` at `11:32:52.048Z` | SSE enqueue `598994 ms`; body chunk `599015 ms`; 239 frames / 238 heartbeats | 72 broker calls completed, 0 unresolved; last completion `11:22:52.124Z` | request body settled as `client-cancellation` at `599963 ms`; adapter `AbortError`; BrowserHost released cleanly as `turn-end-aborted` ~3.0 s later and the runtime naturally returned to `0/0`; no abnormal process event |
+
+- All three are governed by the same clock: each failed request is the final request in a trace containing many earlier successful Responses continuations (42/37/72 normal completions respectively), each abort lands at the configured reqwest 600-second total deadline, and successful body activity continues to roughly 598–599 seconds without extending that deadline.
+
+**INFERENCE**
+
+- The historical “~603–606 seconds after the last tool-result continuation” observation is the same 600-second provider-request deadline plus recorder/cancellation propagation overhead, not a separate browser, broker, daemon, or Goose-turn timer.
+- The user can perceive failures after roughly 20–40 minutes of useful logical work because the 600-second clock is **per provider HTTP request**, not per Goose session or trace. Earlier tool calls/Responses continuations can complete successfully for many minutes; only the later individual request that remains open for 600 seconds is cancelled. The latest trace, for example, performed 72 successful broker/tool continuations before the 73rd Responses request hit the deadline.
+- The correct architecture is a combination: remove the invalid absolute elapsed-time assumption from the streaming provider transport, while keeping Goose as the owner of the hours-long logical task. Goose's native reply loop already persists conversation/tool results, automatically starts successive provider executions, auto-compacts persisted conversation state, honors explicit cancellation, and is action-count bounded (`DEFAULT_MAX_TURNS = 1000`) rather than carrying a 600-second logical-turn deadline.
+- The narrow repair belongs upstream in Goose's OpenAI/provider HTTP client path, not in ChatGPT-Web, Electron/BrowserHost, the tunnel, or Goose Control. For streaming Responses bodies, use reqwest's native no-total-deadline behavior plus bounded connect/setup and, if desired, true read/inactivity timeout semantics. Explicit caller cancellation remains authoritative. Do not reinterpret browser/SSE heartbeats as artificial keepalive work.
+
+**UNKNOWN**
+
+- Exact upstream patch shape remains a maintainer-facing implementation choice: a streaming-specific `ApiClient` request mode/client versus a more general timeout-policy abstraction. The patch must not silently reinterpret existing `timeout_seconds` semantics for unrelated non-streaming providers.
+- Whether Goose should enable a finite read/inactivity timeout by default for streaming Responses, and its value, is not established here. Reqwest already provides the correct reset-on-successful-read primitive; no new elapsed-time heuristic is needed.
+- Whether causal preservation of the underlying reqwest timeout/network error through the streaming decoder should ship in the same patch or a tiny follow-up remains to be decided. It is desirable but not required to localize the 600-second owner.
+
+- **Overlap / dependency:** CGW-006 can still amplify CGW-004 if a human manually resends after the false network failure while older work is settling, but concurrency is not the cause of this timer. Distinct from BrowserHost liveness and CGW-009.
+- **Current implementation / fix status:** not fixed in this repo and not fixed in current Goose upstream. No product code was changed in this planning pass.
+- **Activated runtime contains relevant repair:** NO.
+- **Can existing evidence specify the repair architecture?** YES. It proves removal of an invalid absolute total-stream deadline; it does **not** justify replacing `600` with a larger number.
+- **Required deterministic regression tests:** in Goose provider tests, use a hermetic local Responses SSE server and a scaled-down configured deadline (for example 1 second) so the test crosses the old total deadline quickly while emitting valid chunks more frequently than any inactivity timeout. The repaired streaming path must remain connected and complete after the old deadline; a separate stalled-body case must still trip any selected read/inactivity policy; explicit cancellation must still terminate immediately. No ChatGPT/Electron/tunnel runtime is required.
+- **Out-of-band runtime testing required:** NO for source localization. OOB-006's source-first stop condition is satisfied; do not run a 10+ minute ChatGPT or mock test merely to reconfirm the three natural incidents.
+- **Correct PR/workstream:** upstream Goose OpenAI/provider-client transport, with this repo retaining only the evidence/register update unless an upstream Goose change must later be vendored or pinned.
+- **Recommended next action:** prepare the narrow upstream Goose implementation with the hermetic scaled-deadline SSE regression above, preserving explicit cancellation and causal errors. Do not change `600 -> 7200`, add periodic browser rotation/restart, synthesize keepalive traffic, or create a second orchestration loop.
 
 ### CGW-007 — Broker timeout/orphan/revocation observations lack one clean current root cause
 
@@ -457,17 +488,18 @@ Symptoms and PR comments should map to the register as follows rather than becom
 - **FAIL:** supported cancellation fails, authoritative daemon health is unavailable/malformed/unhealthy, or a required tunnel/BrowserHost/browser component-specific health check fails after clean `0/0` state. Unrelated doctor diagnostics do not by themselves turn successful cleanup into FAIL.
 - **Stop boundary:** one real incident, one skill invocation, no diagnosis or follow-on fix. Successful qualification may close the implementation-validation gap; any BLOCKED/FAIL result returns to a fresh planner with preserved evidence.
 
-### OOB-006 / CGW-006 — Locate the approximately 600-second outer deadline
+### OOB-006 / CGW-006 — Locate the approximately 600-second outer deadline — NOT REQUIRED (source-first stop met)
 
-- **Exact question:** Which outer Goose/provider/client component cancels an otherwise active streaming Responses request at ~600s despite SSE heartbeat activity?
-- **Remaining hypotheses:** H1 Goose HTTP client has a total-request/body deadline near 600s; H2 another outer provider wrapper/decoder enforces it; H3 OS/proxy transport does; H4 repo daemon terminates it (already disfavored by recorder evidence).
+- **Disposition:** CLOSED WITHOUT LIVE OOB EXECUTION. Installed Goose `1.45.0` source proves H1: the active custom OpenAI provider resolves its unset timeout to 600 seconds and constructs reqwest with a total request/body deadline. Reqwest source proves that deadline does not reset on body chunks. The three natural recorder traces land on that clock.
+- **Exact question:** Which outer Goose/provider/client component cancels an otherwise active streaming Responses request at ~600s despite SSE heartbeat activity? **Answered: Goose OpenAI provider `ApiClient` / reqwest total request timeout.**
+- **Remaining hypotheses:** none for ownership. Patch-shape/read-inactivity policy remains an implementation choice, not an OOB localization question.
 - **Preconditions:** out-of-band executor; no ChatGPT runtime manipulation required.
-- **Allowed actions:** inspect the exact installed/current Goose provider HTTP source/config for total/body/request deadlines; if inconclusive, point Goose at a local mock Responses endpoint that emits valid SSE heartbeat/deltas continuously and completes just after the suspected deadline. Use no ChatGPT/Electron/tunnel.
+- **Allowed actions:** source inspection only was needed and is complete. A local mock remains available solely as an implementation regression technique, not as localization evidence.
 - **Prohibited actions:** no global timeout increase; no retry changes; no live ChatGPT request; no BrowserHost lifecycle action.
-- **Exact observations to capture:** exact source/config owning any deadline; local mock timestamps for first frame, periodic frames, caller cancellation/error, server disconnect; exact user-visible Goose error.
-- **Expected interpretation:** fixed total deadline found/reproduced => fresh planner chooses protocol-safe fix/placement; no cancellation past 620s => historical error belongs elsewhere and planner reopens decoder/proxy hypothesis; daemon-side mock failure => investigate repo Responses wrapper.
-- **Stop boundary:** source proof of the exact 600s deadline is sufficient; otherwise one mock run crossing it. No implementation.
-- **Compact return contract:** deadline owner + exact source/config breadcrumb + mock outcome if run + error text + recommended owner only, not a timeout patch.
+- **Exact observations captured:** installed/current Goose source/config owner, reqwest total-deadline semantics, exact natural request-abort timing, last successful SSE/body activity, caller-cancellation propagation, and user-visible error classification.
+- **Expected interpretation:** satisfied by source proof; no localization mock is needed.
+- **Stop boundary:** source proof of the exact 600s deadline is sufficient; met on 2026-08-16. No implementation was performed in this pass.
+- **Compact return contract:** satisfied by CGW-006 above. Next work is the upstream Goose implementation packet, not OOB-006.
 
 ### OOB-009 / CGW-009 — Determine a safe independent send-acceptance signal
 
