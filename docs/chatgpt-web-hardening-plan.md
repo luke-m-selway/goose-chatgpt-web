@@ -147,25 +147,25 @@ This supports PR #32's large-context concern as a strong correlated risk, but no
 - **Correct PR/workstream:** Goose owns creation/scheduling of the tool-pair-summary operations; the Goose/provider boundary currently carries session identity but not operation purpose. ChatGPT-Web must support valid distinct executions rather than serialize them. PR #32 remains separate and still requires isolated CGW-010 evidence.
 - **Recommended next action:** treat same-session overlap as valid by default when execution keys differ; diagnose future failures by operation ownership and settlement state, not by session identity or prompt-size asymmetry.
 
-### CGW-005 — Supported retained-turn recovery is operationally proven but not yet packaged as a skill
+### CGW-005 — Supported retained-turn recovery is packaged as a bounded out-of-band skill
 
 - **Class:** operational
-- **Final classification:** READY-FOR-FIX
-- **User impact:** after a retained-turn/replacement-surface spinout, an operator or fresh repair agent can waste time rediscovering safe recovery or escalate to broad process restarts/kills unnecessarily.
-- **Frequency / severity:** repeated enough to have two documented incidents; recovery itself is reliable and low risk when used for the correct trigger.
-- **Exact supporting evidence:** `docs/chatgpt-web-runtime-recovery-skill-plan.md`; PR #31 comments document `codex-chatgpt-web service cancel-turns` returning the runtime to clean idle state after retained-turn spinout. Current plan explicitly separates recovery from diagnosis and forbids ad-hoc process kills when supported cancellation succeeds.
-- **Current root-cause confidence:** high for the operational procedure; it is not a diagnosis of why spinout happened.
-- **Known facts:** recovery must inspect minimal state, preserve the triggering trace/error, invoke supported cancellation only when retained-turn spinout is established, verify clean idle, and avoid service restart if cancellation succeeds.
-- **Unknowns:** none material; skill discovery wiring should be reconciled with the current repo agent-skill convention during implementation.
-- **Overlap / dependency:** operational safety net for CGW-004/CGW-009 and future UI failures; must never be treated as their fix.
-- **Current implementation / fix status:** design complete, implementation absent.
-- **Activated runtime contains relevant repair:** N/A; this is an agent procedure.
-- **Can existing evidence fully specify a fix?** YES.
-- **Smallest proposed repair:** add `.agents/skills/chatgpt-web-runtime-recovery/SKILL.md` from the existing plan and one short `AGENTS.md` activation rule. Do not add a new orchestration service/framework.
-- **Required deterministic regression tests:** if skill discovery is automated, add the smallest discovery/schema test; otherwise validate file structure/content and current CLI command names without invoking cancellation.
-- **Out-of-band runtime testing required:** NO for implementation. A later real incident can serve as ecological validation.
+- **Final classification:** IMPLEMENTED / NEEDS-OUT-OF-BAND-QUALIFICATION
+- **User impact:** after a retained-turn/replacement-surface spinout, an operator or fresh repair agent no longer needs to rediscover safe cleanup or escalate to broad process restarts/kills unnecessarily.
+- **Frequency / severity:** repeated natural incidents; high operational leverage because the safe cleanup path is small but caller re-admission can make one successful cancellation look complete when it is not.
+- **Exact supporting evidence:** `docs/chatgpt-web-runtime-recovery-skill-plan.md`; current `src/server.ts` and `src/adapters/chatgpt-web/retry-circuit.ts`; hermetic cancellation coverage in `tests/server-lifecycle.test.ts`; and the latest real cleanup, which began at `active_http_turns=1` / `active_browser_turns=1` and required three supported `codex-chatgpt-web service cancel-turns` invocations (`cancelledBrowserTurns=8`, then `2`, then `2`) because the still-active caller re-admitted new browser work after the first two. Only after the third did authoritative health remain `active_http_turns=0` / `active_browser_turns=0`; no daemon, tunnel, or BrowserHost restart was required.
+- **Current root-cause confidence:** high for the recovery contract and caller re-admission interpretation; this remains operational cleanup, not a diagnosis of the incident that created the retained work.
+- **Known facts:** `cancel-turns` first opens every currently retained standalone retry lineage and then clears/cancels the current browser-turn registry. It does **not** drain the daemon or acquire Goose scheduling authority, so a live caller can admit a distinct new operation after cancellation. Cancellation completion and recovery completion are therefore separate. Authoritative recovery success is `active_http_turns=0` and `active_browser_turns=0`, retained across another supported runtime-health observation, with existing infrastructure still healthy. Elapsed time is not readiness evidence.
+- **Unknowns:** the final skill procedure has not yet been independently exercised by a fresh out-of-band agent. The latest ecological cleanup proves that three supported cancellations can be necessary and sufficient, but it was not a qualification run of the packaged skill's full stop/report contract.
+- **Overlap / dependency:** operational safety net for CGW-004/CGW-009 and future UI failures; must never be treated as their fix. Caller re-admission belongs to the caller's authority boundary, not to a new provider admission-control mechanism.
+- **Current implementation / fix status:** `.agents/skills/chatgpt-web-runtime-recovery/SKILL.md` implemented. It uses `/healthz` for authoritative turn counters, `codex-chatgpt-web service cancel-turns` as the only recovery mutation, `codex-chatgpt-web doctor --json` as the supported infrastructure-health check, and a hard budget of three cancellation invocations total (initial + at most two follow-ups triggered only by renewed browser-turn activity). HTTP-only activity does not spend cancellation budget because `cancel-turns` does not own the outer caller stream. If browser re-admission persists after that budget, the skill stops BLOCKED rather than looping or seizing caller authority. Repo-local discovery is automatic: `goose skills list` discovers the skill, so no `AGENTS.md` activation rule is required.
+- **Activated runtime contains relevant repair:** N/A; this is an agent procedure and this session did not activate or exercise it against the live ChatGPT-Web runtime.
+- **Can existing evidence fully specify a fix?** YES; no new native/runtime primitive is required because `/healthz`, supported cancellation, and `doctor --json` already expose the necessary state/action/health contracts.
+- **Smallest proposed repair:** implemented as the single repo-local skill above. No runtime source/config change, caller kill, drain fence, lifecycle reset, retry framework, supervisor, or Goose-state manipulation was added.
+- **Required deterministic regression tests:** skill discovery/parse via `goose skills list`; source/contract review of current command spelling and cancellation semantics; `git diff --check`. No live cancellation or BrowserHost qualification from a ChatGPT-Web-backed session.
+- **Out-of-band runtime testing required:** YES. OOB-005 should run from one fresh non-affected agent on the next real retained/re-admission incident (do not manufacture one), invoke the skill exactly as written, and prove PASS/BLOCKED from authoritative state. The existing ecological three-call cleanup is supporting evidence, not a substitute for packaged-skill qualification.
 - **Correct PR/workstream:** PR #31 operational hardening or a tightly scoped follow-up.
-- **Recommended next action:** implement after the identity/settlement fixes or before any later destructive experiment, whichever comes first.
+- **Recommended next action:** perform OOB-005 at the next genuine abandoned retained-turn incident; do not run a synthetic spinout merely to exercise the skill.
 
 ### CGW-006 — Outer Responses caller cancels active streams at approximately 600 seconds
 
@@ -415,15 +415,15 @@ Symptoms and PR comments should map to the register as follows rather than becom
 4. Add deterministic tests: fail-then-success exact key starts a second runtime; fail-twice opens existing circuit; unrelated generic errors remain terminal/replayable; original cause survives.
 5. No live descriptor deletion/reproduction is required.
 
-### RF-3 / CGW-005 — Package the already-proven recovery procedure
+### RF-3 / CGW-005 — Package the already-proven recovery procedure — DONE; OOB qualification tracked as OOB-005
 
-**Implementation packet**
+**Implemented packet**
 
-1. Reconcile the existing plan with current CLI command spelling.
-2. Add `.agents/skills/chatgpt-web-runtime-recovery/SKILL.md` with strict trigger, minimal preflight, supported `service cancel-turns`, clean-idle verification, escalation boundary, prohibited actions, and compact return contract.
-3. Add one short `AGENTS.md` rule that points retained-turn/replacement-surface spinout recovery to the skill.
-4. Do not diagnose the underlying defect inside the skill; do not add process-kill orchestration.
-5. Validate discovery/structure without invoking recovery against the current runtime.
+1. Reconciled current CLI/service semantics: `/healthz` owns authoritative turn counters, and `codex-chatgpt-web service cancel-turns` is the supported cancellation action.
+2. Added `.agents/skills/chatgpt-web-runtime-recovery/SKILL.md` with strict out-of-band trigger, deterministic state verification, a three-call total cancellation budget for state-proven caller re-admission, PASS/FAIL/BLOCKED outcomes, stop boundary, prohibited actions, and evidence preservation.
+3. Did not add an `AGENTS.md` activation rule because current Goose skill discovery finds the repo-local skill automatically via `goose skills list`.
+4. Kept recovery separate from diagnosis and added no process-kill, restart, drain-fence, retry, supervisor, or caller-control machinery.
+5. Validate discovery/structure only; live runtime qualification is OOB-005 and must not run from the ChatGPT-Web-backed implementation session.
 
 ### RF-4 / CGW-013 — Split hermetic verification from explicit managed-Chrome compatibility smoke
 
@@ -443,6 +443,18 @@ Symptoms and PR comments should map to the register as follows rather than becom
 - **Owning operation:** `stream_response_from_provider(...)` owns the ordinary turn; `maybe_summarize_tool_pairs(...)` owns the background `complete_fast(...)` requests. Both intentionally reuse the same Goose session identity while retaining distinct provider execution keys.
 - **Stop boundary satisfied:** exact operation ownership is established from Goose 1.45.0 source, historical Goose CLI operation logs, session metadata, and the existing flight-recorder timelines. Do not run a replacement live qualification merely to reconfirm it.
 - **If a future different pair is ambiguous:** capture Goose-native operation identity if Goose exposes it; otherwise add only the smallest passive authoritative field available. Do not infer purpose from prompt length and do not serialize by `agent-session-id`.
+
+### OOB-005 / CGW-005 — Qualify the packaged recovery skill on the next real abandoned spinout
+
+- **Exact question:** Can a fresh out-of-band agent use the packaged skill to restore and prove clean idle without acquiring caller authority or restarting infrastructure, including the bounded caller re-admission branch?
+- **Preconditions:** a genuine retained/replacement-surface incident has already occurred; the affected logical work is explicitly abandoned; the qualifying agent is fresh and does not depend on the ChatGPT-Web runtime being recovered. Do not manufacture a spinout just for this proof.
+- **Allowed actions:** apply `.agents/skills/chatgpt-web-runtime-recovery/SKILL.md` exactly; read only projected `/healthz` recovery fields; run `codex-chatgpt-web service cancel-turns` only when state requires it and at most three times total; run `codex-chatgpt-web doctor --json` only after `0/0` is observed; preserve existing trace/error identifiers.
+- **Prohibited actions:** no lifecycle/service/tunnel/BrowserHost restart or stop; no process kill; no Electron window manipulation; no failed-task replay/continuation; no source/config edit; no credentials/Keychain/Goose-SQLite inspection; no diagnosis in the recovery run.
+- **Exact observations to capture:** preflight and final `active_http_turns` / `active_browser_turns` / `accepting_turns` / daemon status; every `cancelledBrowserTurns` output; whether counters reappeared after a cancellation; `doctor --json` `ok` verdict; whether any process/service was restarted.
+- **PASS:** authoritative `0/0` is observed, `doctor --json` reports `ok=true`, and a second `/healthz` read after that supported health check remains `0/0`, all within the three-cancellation action budget.
+- **BLOCKED:** caller browser re-admission continues after the third cancellation; HTTP-only activity remains after browser cancellation and the supported health bracket; or the agent cannot safely establish out-of-band/abandoned-work preconditions. For repeated browser admission report `cancellation succeeded but caller is still re-admitting work`; do not keep cancelling.
+- **FAIL:** supported cancellation fails, authoritative health is unavailable/malformed, or infrastructure remains unhealthy after clean `0/0` state.
+- **Stop boundary:** one real incident, one skill invocation, no diagnosis or follow-on fix. Successful qualification may close the implementation-validation gap; any BLOCKED/FAIL result returns to a fresh planner with preserved evidence.
 
 ### OOB-006 / CGW-006 — Locate the approximately 600-second outer deadline
 
@@ -523,7 +535,7 @@ This is the mandatory fresh-planner return set. It is a subset of the out-of-ban
 
 1. **CGW-002 — execution identity.** Fix first because content equality currently contaminates every later retry/failure interpretation.
 2. **CGW-003 — stale pre-lease failure settlement.** Prevent a transient BrowserHost availability error from poisoning a legitimate exact-key retry after identity is trustworthy.
-3. **CGW-005 — recovery skill.** Package the proven minimal recovery before later experiments so out-of-band agents have a safe stop path if retained-turn spinout recurs.
+3. **CGW-005 — recovery skill.** IMPLEMENTED; keep OOB-005 as the single remaining packaged-skill qualification, using the next real abandoned incident rather than a synthetic spinout.
 4. **CGW-004 — identified valid Goose concurrency; no serialization fix.** Preserve distinct operation identity. Reopen only for a separately proved settlement/cancellation invariant violation, not because two surfaces share `agent-session-id`.
 5. **CGW-009 — send acceptance indeterminacy.** Once overlap provenance is clean, isolate accepted-but-unacknowledged sends without overlapping Playwright controls.
 6. **CGW-006 — outer ~600s cancellation.** This can run independently using Goose source/local mock, but implementation placement should follow clean provider settlement evidence.
