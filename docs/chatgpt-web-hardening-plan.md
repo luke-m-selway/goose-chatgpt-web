@@ -123,25 +123,29 @@ This supports PR #32's large-context concern as a strong correlated risk, but no
 - **Correct PR/workstream:** PR #31.
 - **Recommended next action:** observe only; reopen only with a post-`2509f7de` trace that violates the repaired contract. A deeper helper-process integration test could later exercise a real post-dispatch `/v1/turn/start` control failure across the IPC boundary and confirm it remains generic/conservative; this is not required for CGW-003 qualification.
 
-### CGW-004 — Same-Goose-session distinct executions can overlap and amplify failure surfaces
+### CGW-004 — Same-Goose-session distinct executions can overlap because Goose intentionally runs tool-pair summarization beside the ordinary provider turn
 
-- **Class:** likely-defect
-- **Final classification:** NEEDS-OUT-OF-BAND-TEST; MUST RETURN TO FRESH PLANNER
-- **User impact:** one Goose session can have multiple independently admitted BrowserHost surfaces. When one path fails, later requests can open additional surfaces while an earlier path is still alive, producing duplicate windows, retained active turns, repeated close/reopen behavior, and difficult-to-interpret recovery.
-- **Frequency / severity:** multiple natural incidents; severe because it multiplies side effects and contaminates later failure evidence.
-- **Exact supporting evidence:** `docs/chatgpt-web-network-error-retry-lineage-evidence.md`, runtime-recovery skill plan, PR #31 comments, passive traces. Strong examples: `e33c7b505cba` and `4048d843a134` share agent session `20260814_42`, distinct execution keys and retry lineages, and were admitted 15ms apart; both leased surfaces. `43df7096a128` and `baf97a863c1b` share `20260815_18`, distinct keys/lineages and were admitted ~241ms apart; while `43df...` remained live, `68aa6355880d` started another distinct execution and succeeded. `7926414d69a8` and `feae22156c7d` similarly started ~26ms apart under `20260814_37`. These are **not** `retry-replacement-linked` exact-key retries.
-- **Current root-cause confidence:** high that concurrent same-session distinct executions exist; medium on why Goose emitted each pair.
-- **Known facts:** the strongest pairs are highly asymmetric in compiled prompt size: `e33...` ~578.5k chars vs `4048...` ~5.9k; `43df...` ~564.5k vs `baf...` ~6.3k and then `68aa...` ~8.5k. Current source recognizes stock Goose compaction separately and contains a deterministic 592k-character / roughly 160k-token compaction regression. This makes compaction/main-turn overlap the leading hypothesis, not a proven fact.
-- **Unknowns:** whether each observed large member is actually `_gooseCompactionRequest`; whether stock Goose intentionally overlaps compaction and the following ordinary request; whether an occasional other `complete_fast()` purpose is involved; which layer should serialize or supersede an older browser execution.
-- **Overlap / dependency:** many symptoms previously called “retry amplification” map here, but CGW-002/003 can independently cause replay. CGW-010 large-context risk can make the large member slower/more failure-prone. CGW-005 is recovery only.
-- **Current implementation / fix status:** no safe generic fix yet. A per-`agent-session-id` global mutex is explicitly **not** justified: it could serialize legitimate protocol work or deadlock compaction/tool continuation.
-- **Activated runtime contains relevant repair:** NO.
-- **Can existing evidence fully specify a fix?** NO.
-- **Smallest proposed repair if YES:** N/A until request purpose is discriminated.
-- **Required deterministic regression tests:** once diagnosed, tests must encode the proven request-purpose relationship first; likely tests will ensure a superseded compaction cannot own a second active BrowserHost surface while the same Goose turn continues, without blocking distinct child agent sessions or valid exact-key continuation.
-- **Out-of-band runtime testing required:** YES, bounded packet OOB-004 below.
-- **Correct PR/workstream:** PR #31 for settlement/admission if provider-side; PR #32 only if the result shows the large-context transport itself is causal. Do not merge the tracks pre-emptively.
-- **Recommended next action:** run OOB-004 only after CGW-002/003 are implemented and activated, then return evidence to a fresh ChatGPT-Web planner.
+- **Class:** Goose-native concurrency contract / provider compatibility, not an admission defect by itself
+- **Final classification:** IDENTIFIED — NOT-A-PROVIDER-DEFECT for the same-session overlap itself; do not mark FIXED and do not serialize it
+- **User impact:** one Goose session can legitimately own multiple independently admitted provider/browser executions at once. The confusing duplicate-window/reopen symptom is real, but the strongest historical pairs are not duplicate ordinary turns: Goose intentionally starts background tool-pair summarization while the ordinary provider turn is active. Provider/browser failures can therefore be visible on more than one valid operation, and the background batch can keep admitting later summary operations while the ordinary provider operation is still settling.
+- **Frequency / severity:** multiple natural incidents; high diagnostic severity because valid Goose concurrency was previously conflated with retry amplification and possible compaction/main-turn overlap.
+- **CONFIRMED — operation identity:** Goose 1.45.0 source (`crates/goose/src/agents/agent.rs` + `crates/goose/src/context_mgmt/mod.rs`) first creates the ordinary `stream_response_from_provider(...)` stream, then calls `maybe_summarize_tool_pairs(...)`. That helper returns a `tokio::spawn` task and sequentially summarizes a bounded batch of old tool pairs with `complete_fast(...)`, using the same Goose `session_id`. `complete_fast(...)` and the ordinary stream are both wrapped in Goose's session context, so both requests intentionally carry the same `agent-session-id`. The provider trait itself has no request-purpose field.
+- **CONFIRMED — strongest historical pairs:** `e33c7b505cba` (ordinary turn) / `4048d843a134` (first tool-pair summary) in `20260814_42`; `43df7096a128` (ordinary turn) / `baf97a863c1b` (first tool-pair summary) in `20260815_18`; `7926414d69a8` (ordinary turn) / `feae22156c7d` (first tool-pair summary) in `20260814_37`. Each pair has distinct execution keys and retry lineages and no `retry-replacement-linked` relationship. The ordinary member is the large request in all three pairs; the background summary member is the small request.
+- **CONFIRMED — direct historical breadcrumbs:** the Goose CLI log terminates the `43df...` ordinary failure under `goose::agents::agent` and, at `baf...` settlement, logs `Failed to summarize tool pair` from `goose::context_mgmt`. In `20260814_42`, after `e33...` fails, the recorder shows a sequence of same-session distinct executions beginning with `4048...`; the Goose session DB simultaneously gains agent-only text summary records whose inherited creation timestamps point back to older tool pairs, matching `summarize_tool_call()`'s storage contract. `20260814_37` shows the same pattern after `792...`: `feae...` succeeds, more same-session small requests follow, and subsequent failures are logged as tool-pair-summary failures.
+- **CONFIRMED — `68aa...` is not recovery/retry:** after `baf...` fails, `maybe_summarize_tool_pairs()` continues its bounded `for tool_id in tool_ids` loop. `68aa6355880d` is the next tool-pair summarization operation in that same Goose-owned background batch, not a replacement of `43df...` and not an ordinary-turn retry.
+- **CONFIRMED — settlement behavior:** an ordinary provider error sets `provider_errored` and breaks that provider stream, but Goose aborts the background tool-pair task only when the outer cancellation token is cancelled; otherwise it awaits the task and applies any successful summaries. Therefore a failed ordinary provider execution can coexist with still-running summary executions without implying that Goose has already settled the logical turn or that ChatGPT-Web retried it.
+- **REFUTED:** the leading “large stock Goose compaction + small ordinary response (or vice versa)” interpretation for these strongest pairs. Stock auto-compaction is awaited before `reply_internal(...)` in Goose 1.45.0, while the observed pair shape matches the separately spawned tool-pair summarizer. Prompt size remains supporting evidence only and was not used to classify request purpose.
+- **REFUTED:** the older generic “retry amplification” interpretation for these initial overlaps. All cited operations are first-attempt independent lineages (`retryCount=0`) with no retry-replacement link. The later `68aa...` request is another background summary item, not a retry descendant.
+- **UNKNOWN:** whether any separate historical incident outside these reconstructed pairs contains true stock-compaction/ordinary overlap, and whether any provider/browser settlement bug remains once valid Goose-owned concurrency is treated as such. Those are separate questions and are not evidence for serializing this session.
+- **Overlap / dependency:** CGW-002/003 remain FIXED / OBSERVE and are not reopened. CGW-010 still owns isolated large-context risk; the large ordinary members here are concurrency-confounded and cannot prove a size defect. CGW-006 may independently explain caller cancellation, but it does not explain these near-simultaneous admissions.
+- **Current implementation / fix status:** no CGW-004 causal fix is warranted from this evidence. In particular, no per-session mutex, one-surface restriction, supersession rule, debounce, arbitrary delay, or compaction special case should be added. Intentional Goose concurrency must retain distinct execution identity/ownership.
+- **Activated runtime contains relevant repair:** N/A — no runtime repair is proposed or activated for the identified concurrency contract.
+- **Can existing evidence fully specify a fix?** NO FIX REQUIRED for admission overlap. Any future settlement defect must be specified against the owning Goose operation and its cancellation/settlement contract rather than against `agent-session-id` alone.
+- **Telemetry gap:** no telemetry change is required to close this historical provenance question because the existing Goose CLI log, session metadata, flight recorder, and exact Goose 1.45.0 source establish ownership. The flight recorder still lacks a general Goose-native request-purpose field, and ChatGPT-Web can deterministically recognize only stock Goose compaction from the request body today; do not invent `ordinary-turn` vs `tool-pair-summary` heuristics at the provider boundary.
+- **Required deterministic regression tests:** none for a serialization fix. If a later provider settlement defect is isolated under this valid concurrency, its test must preserve one ordinary execution plus independently identified tool-pair-summary execution(s) and prove only the violated settlement/cancellation invariant.
+- **Out-of-band runtime testing required:** NO for CGW-004 provenance; OOB-004 is closed by existing evidence below.
+- **Correct PR/workstream:** Goose owns creation/scheduling of the tool-pair-summary operations; the Goose/provider boundary currently carries session identity but not operation purpose. ChatGPT-Web must support valid distinct executions rather than serialize them. PR #32 remains separate and still requires isolated CGW-010 evidence.
+- **Recommended next action:** treat same-session overlap as valid by default when execution keys differ; diagnose future failures by operation ownership and settlement state, not by session identity or prompt-size asymmetry.
 
 ### CGW-005 — Supported retained-turn recovery is operationally proven but not yet packaged as a skill
 
@@ -371,13 +375,13 @@ Symptoms and PR comments should map to the register as follows rather than becom
 | --- | --- | --- |
 | Fresh Goose chats with identical text replay same old descriptor error | CGW-002 + CGW-003 | Two mechanisms: cross-session content identity collision exposes a stale exact-key settled infrastructure error. |
 | `Launcher browser host is unavailable: descriptor is missing` after BrowserHost restoration | CGW-003 | Pre-lease availability error classification/retirement, not PR #33 lazy-start design. |
-| Two ChatGPT windows after a Goose network failure | CGW-004 + CGW-006 | Outer request can die while browser remains alive; a distinct same-session execution can then own another surface. Exact retry duplication is not proven. |
-| Repeated close/reopen/retry / retained active browser turns / 12-turn spinout | CGW-004, operationally CGW-005 | Amplification symptom; supported cancellation is recovery, not cause/fix. |
+| Two ChatGPT windows during one Goose turn | CGW-004; CGW-006 only when ~600s cancellation is separately present | The strongest historical overlaps are an ordinary provider execution plus Goose-owned background tool-pair summarization, each with a distinct execution key/surface. Same-session overlap alone is valid concurrency, not retry duplication. |
+| Repeated close/reopen/retry / retained active browser turns / 12-turn spinout | CGW-004 only as concurrency context, operationally CGW-005 | Multiple valid Goose operations can expose multiple failure surfaces; supported cancellation is recovery, not cause/fix. Diagnose any retained-turn defect against the owning operation rather than session identity. |
 | `Network error: Stream decode error` near 603–606s | CGW-006 | Current recorder localizes cancellation to the caller at ~600s; no daemon body-decode error is recorded. |
 | Broker timeout / orphaned tool state | CGW-007, sometimes downstream of CGW-006/004 | Not enough clean evidence for a separate current broker fix. |
 | `Connection interrupted. Waiting for the complete answer` | CGW-008 | Ecological UI symptom; no current recorder occurrence. |
 | Prompt accepted / generation starts but local send fails | CGW-009 | Separate from the fixed diagnostic-overlap incident CGW-015. |
-| ~560–579k prompt failures | CGW-010, possibly CGW-004 | Strong size correlation; many are concurrent and may be stock compaction. Do not call attachment causally proven. |
+| ~560–579k prompt failures | CGW-010, with CGW-004 as concurrency context only | Strong size correlation remains, but the reconstructed large members are ordinary Goose turns overlapping tool-pair summarization, not stock compaction. Do not call size/attachment causally proven until CGW-010 is isolated. |
 | Short `@g`, polluted menu, missing connector row | CGW-001 | Repaired by `a98ab0d`; observe only. |
 | True BrowserHost absent when provider is first needed | CGW-011 | PR #33 design boundary, not CGW-003 stale replay. |
 | Actual reboot/login not proven | CGW-012 | Validation gap, not evidence of a lifecycle defect. |
@@ -433,17 +437,12 @@ Symptoms and PR comments should map to the register as follows rather than becom
 
 ## 5. NEEDS-OUT-OF-BAND-TEST queue
 
-### OOB-004 / CGW-004 — Identify the purpose of same-session overlapping executions
+### OOB-004 / CGW-004 — CLOSED; existing evidence identifies the purpose of same-session overlapping executions
 
-- **Exact question:** In the natural duplicate-surface pattern, is the large execution a stock Goose compaction overlapping an ordinary response, or are two other request purposes being admitted concurrently?
-- **Remaining hypotheses:** H1 stock `_gooseCompactionRequest` + ordinary response overlap; H2 ordinary response + `complete_fast()`/session metadata task; H3 two independent ordinary responses caused by outer recovery/retry behavior; H4 another purpose.
-- **Preconditions:** CGW-002 and CGW-003 implemented/activated; clean idle runtime; no retained browser turns; out-of-band executor not hosted by the runtime it is observing.
-- **Allowed actions:** add/enable the smallest privacy-safe request-purpose telemetry if needed (`requestKind`, `stockGooseCompaction` boolean, normalized input item count/compiled prompt chars; no bodies); observe one naturally occurring compaction/continuation or use an isolated Goose session whose compaction is already imminent; inspect passive recorder/launcher/daemon logs.
-- **Prohibited actions:** no generic per-session mutex; no timeout/retry changes; no stress/concurrency fan-out; no manual surface close; no service kill; no PR #32 externalization; no Goose Control changes.
-- **Exact observations to capture:** agent-session-id hash, request kind, execution-key hash, trace ID, request accepted timestamp, compiled prompt chars/tokens, active browser count, lease/release timestamps, Responses outcome, whether the second request started before the first settled.
-- **Expected interpretation:** H1 => likely compaction scheduling/supersession problem; return to planner to choose Goose vs provider serialization boundary and relation to PR #32. H2 => planner decides whether metadata task should bypass BrowserHost or be serialized. H3 => revisit outer retry/settlement logic. H4 => report exact purpose before any fix.
-- **Stop boundary:** stop after one clean reproducing overlap with both purposes identified, or after one natural compaction cycle shows no overlap; do not continue into implementation.
-- **Compact return contract:** one table of the two executions + hypothesis verdict + exact trace/log breadcrumbs + no proposed code unless asked by the fresh planner.
+- **Result:** no new runtime experiment is required. The strongest historical pairs are ordinary Goose provider turns overlapping Goose's intentionally spawned tool-pair summarization batch, not stock-compaction/ordinary overlap and not retry amplification.
+- **Owning operation:** `stream_response_from_provider(...)` owns the ordinary turn; `maybe_summarize_tool_pairs(...)` owns the background `complete_fast(...)` requests. Both intentionally reuse the same Goose session identity while retaining distinct provider execution keys.
+- **Stop boundary satisfied:** exact operation ownership is established from Goose 1.45.0 source, historical Goose CLI operation logs, session metadata, and the existing flight-recorder timelines. Do not run a replacement live qualification merely to reconfirm it.
+- **If a future different pair is ambiguous:** capture Goose-native operation identity if Goose exposes it; otherwise add only the smallest passive authoritative field available. Do not infer purpose from prompt length and do not serialize by `agent-session-id`.
 
 ### OOB-006 / CGW-006 — Locate the approximately 600-second outer deadline
 
@@ -497,11 +496,10 @@ Symptoms and PR comments should map to the register as follows rather than becom
 
 This is the mandatory fresh-planner return set. It is a subset of the out-of-band work above plus PR #33 design work; the experiment must not flow directly into implementation when its result can change the fix boundary.
 
-1. **CGW-004** — same-session overlap: result decides whether repair belongs in Goose scheduling, provider admission/supersession, or context transport.
-2. **CGW-006** — ~600s cancellation: result decides repo-local vs Goose client fix and must not become a blind timeout increase.
-3. **CGW-009** — send acknowledgement: result decides which independent acceptance signal, if any, can be used without reintroducing overlapping Playwright control.
-4. **CGW-010** — large context: result decides whether PR #32 externalization is justified or whether concurrency/control repair removes the need.
-5. **CGW-011** — PR #33: a fresh planner must first reconcile the current Goose provider/application lifecycle API with the documented ownership boundary before implementation.
+1. **CGW-006** — ~600s cancellation: result decides repo-local vs Goose client fix and must not become a blind timeout increase.
+2. **CGW-009** — send acknowledgement: result decides which independent acceptance signal, if any, can be used without reintroducing overlapping Playwright control.
+3. **CGW-010** — large context: result decides whether PR #32 externalization is justified now that CGW-004's overlap provenance is identified as valid Goose tool-pair summarization concurrency.
+4. **CGW-011** — PR #33: a fresh planner must first reconcile the current Goose provider/application lifecycle API with the documented ownership boundary before implementation.
 
 ## 7. WATCH / FIXED queue
 
@@ -526,10 +524,10 @@ This is the mandatory fresh-planner return set. It is a subset of the out-of-ban
 1. **CGW-002 — execution identity.** Fix first because content equality currently contaminates every later retry/failure interpretation.
 2. **CGW-003 — stale pre-lease failure settlement.** Prevent a transient BrowserHost availability error from poisoning a legitimate exact-key retry after identity is trustworthy.
 3. **CGW-005 — recovery skill.** Package the proven minimal recovery before later experiments so out-of-band agents have a safe stop path if retained-turn spinout recurs.
-4. **CGW-004 — purpose-correlate same-session overlapping executions.** Do not write a generic mutex; identify compaction/main-turn vs other purposes first.
+4. **CGW-004 — identified valid Goose concurrency; no serialization fix.** Preserve distinct operation identity. Reopen only for a separately proved settlement/cancellation invariant violation, not because two surfaces share `agent-session-id`.
 5. **CGW-009 — send acceptance indeterminacy.** Once overlap provenance is clean, isolate accepted-but-unacknowledged sends without overlapping Playwright controls.
 6. **CGW-006 — outer ~600s cancellation.** This can run independently using Goose source/local mock, but implementation placement should follow clean provider settlement evidence.
-7. **CGW-010 / PR #32 — isolated context-size experiment, then planning.** Only after same-session overlap is understood; implement externalization only if causal evidence supports it.
+7. **CGW-010 / PR #32 — isolated context-size experiment, then planning.** Same-session overlap is now understood; implement externalization only if isolated causal evidence supports it.
 8. **CGW-013 — verification split.** This is implementation-ready at any point by a separate non-self-hosted executor; ensure it lands before the next phase relies on routine `bun run verify` from an agent environment.
 9. **CGW-011 / PR #33 — provider-demand lifecycle.** Keep ownership boundaries unchanged; plan against real Goose lifecycle hooks after PR #31 correctness stabilizes.
 10. **CGW-012 — actual reboot/login proof.** Run out of band after lifecycle code/config is intentionally stable.
