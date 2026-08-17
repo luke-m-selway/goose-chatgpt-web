@@ -68,6 +68,72 @@ function turnIdOf(prepared: unknown): string {
   return (JSON.parse(raw as string) as { turn_id: string }).turn_id;
 }
 
+async function executionIdentitySeenByResponseRequest(
+  raw: unknown,
+  config: ReturnType<typeof defaultConfig>,
+  agentSessionId?: string,
+): Promise<{ turnId: string; executionKey: string }> {
+  let seen: { turnId: string; executionKey: string } | undefined;
+  const adapter: ProviderAdapter = {
+    name: "standalone-identity-capture",
+    async runTurn(parsed, _incoming, emit) {
+      const turnId = extractChatGptTurnIdentity(parsed).turnId;
+      expect(typeof turnId).toBe("string");
+      seen = { turnId: turnId as string, executionKey: chatGptTurnExecutionKey(parsed) };
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  };
+  const headers = new Headers({ "content-type": "application/json" });
+  if (agentSessionId !== undefined) headers.set("agent-session-id", agentSessionId);
+  const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(raw),
+  }), config, () => adapter);
+  expect(response.status).toBe(200);
+  await response.json();
+  expect(seen).toBeDefined();
+  return seen as { turnId: string; executionKey: string };
+}
+
+test("trusted agent-session-id namespaces otherwise identical standalone execution identity", async () => {
+  const config = { ...defaultConfig("browser-only"), standalone: true };
+  const raw = {
+    model,
+    stream: false,
+    input: [{ role: "user", content: [{ type: "input_text", text: "Reply exactly READY." }] }],
+  };
+
+  const sessionAFirst = await executionIdentitySeenByResponseRequest(raw, config, "goose-session-a");
+  const sessionARetry = await executionIdentitySeenByResponseRequest(structuredClone(raw), config, "goose-session-a");
+  const sessionB = await executionIdentitySeenByResponseRequest(structuredClone(raw), config, "goose-session-b");
+
+  expect(sessionARetry).toEqual(sessionAFirst);
+  expect(sessionB.turnId).not.toBe(sessionAFirst.turnId);
+  expect(sessionB.executionKey).not.toBe(sessionAFirst.executionKey);
+});
+
+test("explicit native turn identity remains authoritative with an agent-session-id header", async () => {
+  const config = { ...defaultConfig("browser-only"), standalone: true };
+  const raw = {
+    model,
+    stream: false,
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({ thread_id: "native-thread", turn_id: "native-turn" }),
+    },
+    input: [{
+      type: "message",
+      id: "msg_native",
+      role: "user",
+      content: [{ type: "input_text", text: "Reply exactly READY." }],
+      internal_chat_message_metadata_passthrough: { turn_id: "native-turn" },
+    }],
+  };
+
+  const seen = await executionIdentitySeenByResponseRequest(raw, config, "goose-session-a");
+  expect(seen.turnId).toBe("native-turn");
+});
+
 test("default standalone identity is deterministic: a byte-identical retry reuses the same turn_id", () => {
   const config = { ...defaultConfig("browser-only"), standalone: true };
   const raw = {
@@ -82,7 +148,8 @@ test("default standalone identity is deterministic: a byte-identical retry reuse
   // opening a second browser tab for work that may already be in flight or already answered.
   const first = turnIdOf(prepareStandaloneTextRequest(raw, config));
   const second = turnIdOf(prepareStandaloneTextRequest(structuredClone(raw), config));
-  expect(first).toBe(second);
+  expect(first).toBe("standalone_4de071dc86fe76ce4d520a1420295acd");
+  expect(second).toBe(first);
 });
 
 test("default standalone identity changes once a new user message is appended", () => {
@@ -102,8 +169,8 @@ test("default standalone identity changes once a new user message is appended", 
       { role: "user", content: [{ type: "input_text", text: "What token did I ask you to remember?" }] },
     ],
   };
-  const firstTurnId = turnIdOf(prepareStandaloneTextRequest(turnOne, config));
-  const secondTurnId = turnIdOf(prepareStandaloneTextRequest(turnTwo, config));
+  const firstTurnId = turnIdOf(prepareStandaloneTextRequest(turnOne, config, undefined, "goose-session-a"));
+  const secondTurnId = turnIdOf(prepareStandaloneTextRequest(turnTwo, config, undefined, "goose-session-a"));
   expect(firstTurnId).not.toBe(secondTurnId);
 });
 
@@ -175,8 +242,8 @@ test("a tool-request round and its function_call_output round resolve to the ide
       { type: "function_call_output", call_id: "call_abc123", output: "GOOSE_TOOL_PROOF_example" },
     ],
   };
-  const initialTurnId = turnIdOf(prepareStandaloneToolRequest(initialRound, toolConfig));
-  const followUpTurnId = turnIdOf(prepareStandaloneToolRequest(followUpRound, toolConfig));
+  const initialTurnId = turnIdOf(prepareStandaloneToolRequest(initialRound, toolConfig, undefined, "goose-session-a"));
+  const followUpTurnId = turnIdOf(prepareStandaloneToolRequest(followUpRound, toolConfig, undefined, "goose-session-a"));
   expect(followUpTurnId).toBe(initialTurnId);
 });
 
@@ -198,8 +265,8 @@ test("a genuinely new human user message after a completed tool round gets a fre
       { role: "user", content: [{ type: "input_text", text: "Call it again." }] },
     ],
   };
-  const firstTurnId = turnIdOf(prepareStandaloneToolRequest(completedTurn, toolConfig));
-  const secondTurnId = turnIdOf(prepareStandaloneToolRequest(nextHumanTurn, toolConfig));
+  const firstTurnId = turnIdOf(prepareStandaloneToolRequest(completedTurn, toolConfig, undefined, "goose-session-a"));
+  const secondTurnId = turnIdOf(prepareStandaloneToolRequest(nextHumanTurn, toolConfig, undefined, "goose-session-a"));
   expect(secondTurnId).not.toBe(firstTurnId);
 });
 
@@ -235,8 +302,8 @@ test("standalone identity is unaffected by the injected <turn-context> current-t
       { role: "user", content: [turnContextPart(currentTime), { type: "input_text", text: "Reply exactly." }] },
     ],
   });
-  const early = turnIdOf(prepareStandaloneTextRequest(requestAt("2026-08-09 03:19:00 +02:00"), config));
-  const late = turnIdOf(prepareStandaloneTextRequest(requestAt("2026-08-09 03:21:47 +02:00"), config));
+  const early = turnIdOf(prepareStandaloneTextRequest(requestAt("2026-08-09 03:19:00 +02:00"), config, undefined, "goose-session-a"));
+  const late = turnIdOf(prepareStandaloneTextRequest(requestAt("2026-08-09 03:21:47 +02:00"), config, undefined, "goose-session-a"));
   expect(late).toBe(early);
 });
 
@@ -269,8 +336,8 @@ test("a tool round and its function_call_output continuation resolve to the same
       { type: "function_call_output", call_id: "call_abc123", output: "GOOSE_TOOL_PROOF_example" },
     ],
   };
-  const initialTurnId = turnIdOf(prepareStandaloneToolRequest(initialRound, toolConfig));
-  const followUpTurnId = turnIdOf(prepareStandaloneToolRequest(followUpRound, toolConfig));
+  const initialTurnId = turnIdOf(prepareStandaloneToolRequest(initialRound, toolConfig, undefined, "goose-session-a"));
+  const followUpTurnId = turnIdOf(prepareStandaloneToolRequest(followUpRound, toolConfig, undefined, "goose-session-a"));
   expect(followUpTurnId).toBe(initialTurnId);
 });
 

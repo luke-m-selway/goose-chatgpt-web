@@ -15,6 +15,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
     }
     return {
       WebContentsView,
+      net: { isOnline: () => true },
       shell: { openExternal: async () => {} },
     };
   }
@@ -30,9 +31,12 @@ const {
 const {
   allowedAuthUrl,
   BrowserHost,
+  CHATGPT_NETWORK_FAILURE_FILTER,
   CHATGPT_VIEWPORT_CSS,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  privacySafeNavigationIdentity,
+  privacySafeNetworkRequestIdentity,
   validateChatGptStorageState,
 } = require("../electron/browser-host.cjs");
 
@@ -118,6 +122,239 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
     responseHeaders: { "content-type": ["application/json"] },
   });
   assert.equal(fixture.cloudflareChallengeRecoveryArmed, true);
+});
+
+test("network failure listener is installed once without disturbing backend recovery", () => {
+  const calls = { completed: [], failed: [] };
+  const listeners = {};
+  const browserSession = {
+    webRequest: {
+      onCompleted(filter, listener) {
+        calls.completed.push(filter);
+        listeners.completed = listener;
+      },
+      onErrorOccurred(filter, listener) {
+        calls.failed.push(filter);
+        listeners.failed = listener;
+      },
+    },
+  };
+  const routed = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: { session: browserSession } },
+    handleChatGptBackendResponse: details => routed.push(["completed", details.id]),
+    handleChatGptNetworkRequestFailure: details => routed.push(["failed", details.id]),
+  });
+
+  BrowserHost.prototype.bindChatGptBackendRecovery.call(fixture);
+  assert.equal(BrowserHost.prototype.bindChatGptNetworkFailureObservation.call(fixture), true);
+  assert.equal(BrowserHost.prototype.bindChatGptNetworkFailureObservation.call(fixture), false);
+
+  assert.equal(calls.completed.length, 1);
+  assert.equal(calls.failed.length, 1);
+  assert.deepEqual(calls.failed[0], CHATGPT_NETWORK_FAILURE_FILTER);
+  listeners.completed({ id: 71 });
+  listeners.failed({ id: 72 });
+  assert.deepEqual(routed, [["completed", 71], ["failed", 72]]);
+});
+
+function networkFailureTab(id, traceId, surfaceId, webContentsId, rendererPid, status = "running") {
+  return {
+    id,
+    traceId,
+    surfaceId,
+    status,
+    rendererPid,
+    view: {
+      webContents: {
+        id: webContentsId,
+        getOSProcessId: () => rendererPid,
+        isDestroyed: () => false,
+      },
+    },
+  };
+}
+
+function networkFailureFixture(tabs, flightRecorder) {
+  return Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(tabs.map(tab => [tab.id, tab])),
+    flightRecorder,
+  });
+}
+
+test("concurrent network failures map by WebContents to independent active traces", () => {
+  const first = networkFailureTab(
+    "tab-network-a",
+    "trace_network_a",
+    "surface_network_a_0123456789AB",
+    701,
+    8701,
+  );
+  const second = networkFailureTab(
+    "tab-network-b",
+    "trace_network_b",
+    "surface_network_b_0123456789AB",
+    702,
+    8702,
+  );
+  const records = [];
+  const pins = [];
+  const fixture = networkFailureFixture([first, second], {
+    updateSurface() {},
+    record(traceId, event, detail) { records.push({ traceId, event, detail }); },
+    observe(traceId, event) { pins.push({ traceId, event }); },
+  });
+  fixture.readNetworkOnlineState = () => false;
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    id: 801,
+    url: "wss://events.chatgpt.com/backend-api/conversation/private-id?access_token=secret#fragment",
+    method: "GET",
+    webContentsId: 701,
+    resourceType: "webSocket",
+    error: "net::ERR_NETWORK_CHANGED",
+  }), true);
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    id: 802,
+    url: "https://api.openai.com/v1/private-resource?token=secret",
+    method: "POST",
+    webContentsId: 702,
+    resourceType: "xhr",
+    error: `net::ERR_CONNECTION_RESET ${"bounded-detail ".repeat(20)}`,
+  }), true);
+
+  assert.deepEqual(records.map(record => [record.traceId, record.detail.surfaceId]), [
+    [first.traceId, first.surfaceId],
+    [second.traceId, second.surfaceId],
+  ]);
+  assert.deepEqual(records[0], {
+    traceId: first.traceId,
+    event: "browser-network-request-failed",
+    detail: {
+      surfaceId: first.surfaceId,
+      rendererPid: 8701,
+      webContentsId: 701,
+      networkRequestId: 801,
+      resourceType: "webSocket",
+      requestMethod: "GET",
+      chromiumErrorCode: "ERR_NETWORK_CHANGED",
+      chromiumErrorDescription: "net::ERR_NETWORK_CHANGED",
+      originClassification: "chatgpt-subdomain",
+      urlPathHash: privacySafeNetworkRequestIdentity(
+        "wss://events.chatgpt.com/backend-api/conversation/private-id",
+      ).urlPathHash,
+      netIsOnline: false,
+      activeBrowserTurns: 2,
+    },
+  });
+  assert.deepEqual(pins, [
+    { traceId: first.traceId, event: "browser-network-request-failed" },
+    { traceId: second.traceId, event: "browser-network-request-failed" },
+  ]);
+  assert.equal(records[1].detail.chromiumErrorCode, "ERR_CONNECTION_RESET");
+  assert.equal(records[1].detail.chromiumErrorDescription.length, 160);
+  assert.doesNotMatch(JSON.stringify(records), /private-id|access_token|secret|private-resource/);
+});
+
+test("network failure telemetry ignores unrelated domains, WebContents, and inactive tabs", () => {
+  const active = networkFailureTab(
+    "tab-network-active",
+    "trace_network_active",
+    "surface_network_active_0123456789AB",
+    711,
+    8711,
+  );
+  const inactive = networkFailureTab(
+    "tab-network-ready",
+    "trace_network_ready",
+    "surface_network_ready_0123456789AB",
+    712,
+    8712,
+    "ready",
+  );
+  const records = [];
+  const fixture = networkFailureFixture([active, inactive], {
+    record(...args) { records.push(args); },
+    observe() {},
+  });
+  const base = {
+    id: 811,
+    method: "GET",
+    resourceType: "xhr",
+    error: "net::ERR_FAILED",
+  };
+
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    ...base,
+    url: "https://example.com/backend-api/conversation",
+    webContentsId: 711,
+  }), false);
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    ...base,
+    url: "https://chatgpt.com/backend-api/conversation",
+    webContentsId: 999,
+  }), false);
+  assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+    ...base,
+    url: "https://chatgpt.com/backend-api/conversation",
+    webContentsId: 712,
+  }), false);
+  assert.equal(records.length, 0);
+});
+
+test("network URL metadata is deterministic and excludes path, query, fragment, and subdomain text", () => {
+  const first = privacySafeNetworkRequestIdentity(
+    "https://private-subdomain.openai.com/v1/private-path?token=first-secret#first-fragment",
+  );
+  const second = privacySafeNetworkRequestIdentity(
+    "https://private-subdomain.openai.com/v1/private-path?token=second-secret#second-fragment",
+  );
+
+  assert.deepEqual(first, second);
+  assert.deepEqual(Object.keys(first).sort(), ["originClassification", "urlPathHash"]);
+  assert.equal(first.originClassification, "openai-subdomain");
+  assert.match(first.urlPathHash, /^[a-f0-9]{32}$/);
+  assert.equal(privacySafeNetworkRequestIdentity("https://example.com/v1/private-path"), null);
+  assert.equal(privacySafeNetworkRequestIdentity("http://chatgpt.com/backend-api/conversation"), null);
+  assert.doesNotMatch(JSON.stringify(first), /private-subdomain|private-path|secret|fragment/);
+});
+
+test("network observation failures cannot affect BrowserHost request handling", async () => {
+  const tab = networkFailureTab(
+    "tab-network-observer-failure",
+    "trace_network_observer_failure",
+    "surface_network_observer_failure_012345",
+    721,
+    8721,
+  );
+  const fixture = networkFailureFixture([tab], {
+    updateSurface() { throw new Error("synthetic update failure"); },
+    record() { throw new Error("synthetic record failure"); },
+    observe() { return Promise.reject(new Error("synthetic screenshot failure")); },
+  });
+
+  assert.doesNotThrow(() => {
+    assert.equal(BrowserHost.prototype.handleChatGptNetworkRequestFailure.call(fixture, {
+      id: 821,
+      url: "https://chatgpt.com/backend-api/conversation",
+      method: "POST",
+      webContentsId: 721,
+      resourceType: "xhr",
+      error: "net::ERR_TIMED_OUT",
+    }), true);
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const installationFixture = {
+    view: { webContents: { session: { webRequest: {
+      onErrorOccurred() { throw new Error("synthetic listener failure"); },
+    } } } },
+  };
+  assert.doesNotThrow(() => {
+    assert.equal(
+      BrowserHost.prototype.bindChatGptNetworkFailureObservation.call(installationFixture),
+      false,
+    );
+  });
 });
 
 function createContents() {
@@ -633,7 +870,16 @@ test("a replacement helper takes over only after the previous owner exited", () 
 
   const lease = BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid);
 
-  assert.deepEqual(lease, { surfaceId: tab.surfaceId, tabId: tab.id });
+  assert.equal(lease.surfaceId, tab.surfaceId);
+  assert.equal(lease.tabId, tab.id);
+  assert.deepEqual(lease.lifecycle, {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: null,
+    status: "active",
+    event: "created",
+    revision: 1,
+  });
   assert.equal(tab.helperPid, process.pid);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0][0], "browser.stale_turn_owner_replaced");
@@ -643,6 +889,7 @@ test("a replacement helper takes over only after the previous owner exited", () 
 test("a live turn heartbeat refreshes its lease and rejects another helper", () => {
   const tab = {
     id: "tab-heartbeat",
+    surfaceId: "surface-heartbeat-0123456789ABCD",
     traceId: "trace_heartbeat",
     helperPid: 444,
     status: "running",
@@ -651,18 +898,271 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]),
     closedTurnOwners: new Map(),
-    snapshot: () => ({ activeTabId: tab.id }),
   });
 
   const before = Date.now();
-  const snapshot = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid);
+  const lifecycle = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid);
 
-  assert.deepEqual(snapshot, { activeTabId: tab.id });
+  assert.deepEqual(lifecycle, {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: null,
+    status: "active",
+    event: "created",
+    revision: 0,
+  });
   assert.ok(tab.lastHeartbeatAt >= before);
   assert.throws(
     () => BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, 445),
     /ownership mismatch: expected 444, received 445/,
   );
+});
+
+function lifecycleContents(rendererPid, initialUrl = "https://chatgpt.com/?temporary-chat=true") {
+  const contents = new EventEmitter();
+  let destroyed = false;
+  let currentUrl = initialUrl;
+  Object.assign(contents, {
+    setWindowOpenHandler() {},
+    getURL: () => currentUrl,
+    getOSProcessId: () => rendererPid,
+    isDestroyed: () => destroyed,
+    insertCSS: async () => "css-key",
+    executeJavaScript: async () => {},
+    close() {
+      destroyed = true;
+      contents.emit("destroyed");
+    },
+    markDestroyed() { destroyed = true; },
+    setURL(url) { currentUrl = url; },
+  });
+  return contents;
+}
+
+function lifecycleFixture(tabs) {
+  return Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(tabs.map(tab => [tab.id, tab])),
+    closedTurnOwners: new Map(),
+    closedTurnLifecycles: new Map(),
+    selectedTabId: tabs[0]?.id || "home",
+    window: { contentView: { removeChildView() {} } },
+    view: { webContents: { getURL: () => "about:blank#codex-web-gpt-browser-host" } },
+    syncViewVisibility() {},
+    hide() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    logger: { info() {}, warn() {}, error() {} },
+  });
+}
+
+function lifecycleTab(id, traceId, surfaceId, helperPid, rendererPid) {
+  return {
+    id,
+    traceId,
+    surfaceId,
+    helperPid,
+    status: "running",
+    lastHeartbeatAt: 1,
+    rendererPid,
+    view: { webContents: lifecycleContents(rendererPid) },
+  };
+}
+
+test("turn navigation evidence distinguishes initial bootstrap from later reload and in-page navigation", () => {
+  const tab = lifecycleTab(
+    "tab-navigation",
+    "trace_navigation",
+    "surface_navigation_0123456789AB",
+    710,
+    8130,
+  );
+  tab.view.webContents.setURL("about:blank#codex-web-gpt-browser-host");
+  const fixture = lifecycleFixture([tab]);
+  const records = [];
+  const pins = [];
+  fixture.flightRecorder = {
+    updateSurface() {},
+    record(traceId, event, detail) { records.push({ traceId, event, detail }); },
+    observe(traceId, event) { pins.push({ traceId, event }); },
+  };
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  tab.view.webContents.emit("did-start-loading");
+  tab.view.webContents.emit("did-finish-load");
+  tab.view.webContents.emit("did-stop-loading");
+  tab.view.webContents.setURL("https://chatgpt.com/?temporary-chat=true");
+  tab.view.webContents.emit("did-start-loading");
+  tab.view.webContents.emit("did-finish-load");
+  tab.view.webContents.emit("did-stop-loading");
+
+  assert.equal(records.filter(record => record.detail.navigationKind === "initial-bootstrap").length, 6);
+  assert.equal(pins.length, 0);
+
+  tab.view.webContents.emit("did-start-loading");
+  tab.view.webContents.emit("did-finish-load");
+  tab.view.webContents.emit("did-stop-loading");
+  tab.view.webContents.emit(
+    "did-navigate-in-page",
+    {},
+    "https://chatgpt.com/?temporary-chat=true#replacement-state",
+    true,
+  );
+
+  const later = records.slice(6);
+  assert.deepEqual(later.map(record => record.detail.navigationKind), [
+    "full-document-navigation-or-reload",
+    "full-document-navigation-or-reload",
+    "full-document-navigation-or-reload",
+    "same-document-navigation",
+  ]);
+  assert.equal(later.every(record => record.detail.unexpectedNavigation === true), true);
+  assert.deepEqual(pins.map(pin => pin.event), [
+    "browser-navigation-load-started",
+    "browser-navigation-in-page",
+  ]);
+  assert.equal(later.every(record => record.detail.rendererPid === 8130), true);
+});
+
+test("navigation metadata hashes path identity without persisting URL contents", () => {
+  const first = privacySafeNavigationIdentity(
+    "https://chatgpt.com/?temporary-chat=true&private=value-one#secret-fragment",
+  );
+  const second = privacySafeNavigationIdentity(
+    "https://chatgpt.com/?temporary-chat=true&private=value-two#different-fragment",
+  );
+  const conversation = privacySafeNavigationIdentity("https://chatgpt.com/c/private-conversation-id");
+
+  assert.deepEqual(first, second);
+  assert.equal(first.isChatGptOrigin, true);
+  assert.equal(first.isTemporaryChat, true);
+  assert.match(first.urlPathHash, /^[a-f0-9]{32}$/);
+  assert.equal(conversation.isChatGptOrigin, true);
+  assert.equal(conversation.isTemporaryChat, false);
+  assert.notEqual(conversation.urlPathHash, first.urlPathHash);
+  assert.doesNotMatch(JSON.stringify({ first, conversation }), /value-one|secret-fragment|private-conversation-id/);
+});
+
+test("navigation observation failure cannot affect WebContents lifecycle state", async () => {
+  const tab = lifecycleTab(
+    "tab-navigation-observer-failure",
+    "trace_navigation_observer_failure",
+    "surface_navigation_observer_failure_012345",
+    711,
+    8131,
+  );
+  tab.navigationLifecycle = { loadSequence: 1, bootstrapComplete: true, activeLoad: null };
+  const fixture = lifecycleFixture([tab]);
+  fixture.flightRecorder = {
+    updateSurface() {},
+    record() { throw new Error("synthetic observation failure"); },
+    observe() { return Promise.reject(new Error("synthetic async observation failure")); },
+  };
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  assert.doesNotThrow(() => tab.view.webContents.emit("did-start-loading"));
+  assert.equal(tab.loading, true);
+  fixture.flightRecorder.record = () => {};
+  assert.doesNotThrow(() => tab.view.webContents.emit(
+    "did-navigate-in-page",
+    {},
+    "https://chatgpt.com/?temporary-chat=true#still-running",
+    true,
+  ));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(tab.url, "https://chatgpt.com/?temporary-chat=true#still-running");
+});
+
+test("Electron unresponsive and responsive events degrade then recover the owned turn", () => {
+  const tab = lifecycleTab(
+    "tab-native-recovery",
+    "trace_native_recovery",
+    "surface_native_recovery_01234567",
+    700,
+    8123,
+  );
+  const fixture = lifecycleFixture([tab]);
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  tab.view.webContents.emit("unresponsive");
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid), {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: 8123,
+    status: "unresponsive",
+    event: "unresponsive",
+    revision: 1,
+  });
+
+  tab.view.webContents.emit("responsive");
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid), {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: 8123,
+    status: "active",
+    event: "responsive",
+    revision: 2,
+  });
+});
+
+test("renderer-gone is retained as deterministic trace/surface-scoped terminal evidence", () => {
+  const failed = lifecycleTab(
+    "tab-renderer-gone",
+    "trace_renderer_gone",
+    "surface_renderer_gone_012345678",
+    701,
+    8124,
+  );
+  const sibling = lifecycleTab(
+    "tab-renderer-live",
+    "trace_renderer_live",
+    "surface_renderer_live_012345678",
+    701,
+    8125,
+  );
+  const fixture = lifecycleFixture([failed, sibling]);
+  BrowserHost.prototype.bindTurnContents.call(fixture, failed);
+
+  failed.view.webContents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 9 });
+
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, failed.traceId, failed.helperPid), {
+    traceId: failed.traceId,
+    surfaceId: failed.surfaceId,
+    rendererPid: 8124,
+    status: "gone",
+    event: "render-process-gone",
+    revision: 1,
+    reason: "crashed",
+  });
+  assert.equal(
+    BrowserHost.prototype.heartbeatTurn.call(fixture, sibling.traceId, sibling.helperPid).status,
+    "active",
+  );
+  assert.equal(fixture.turnTabs.has(sibling.id), true);
+});
+
+test("destroyed owned WebContents is retained as deterministic terminal evidence", () => {
+  const tab = lifecycleTab(
+    "tab-destroyed",
+    "trace_destroyed",
+    "surface_destroyed_0123456789AB",
+    702,
+    8126,
+  );
+  const fixture = lifecycleFixture([tab]);
+  BrowserHost.prototype.bindTurnContents.call(fixture, tab);
+
+  tab.view.webContents.markDestroyed();
+  tab.view.webContents.emit("destroyed");
+
+  assert.deepEqual(BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid), {
+    traceId: tab.traceId,
+    surfaceId: tab.surfaceId,
+    rendererPid: 8126,
+    status: "destroyed",
+    event: "destroyed",
+    revision: 1,
+  });
 });
 
 test("bootstrap and heartbeat expiry reap orphan turn surfaces", () => {
@@ -1097,7 +1597,18 @@ test("a later provider round reuses its task tab and restores active ownership",
 
   const lease = BrowserHost.prototype.beginTurn.call(fixture, "trace_reused", false, 222);
 
-  assert.deepEqual(lease, { surfaceId: "surface-reused", tabId: "tab-reused" });
+  assert.deepEqual(lease, {
+    surfaceId: "surface-reused",
+    tabId: "tab-reused",
+    lifecycle: {
+      traceId: "trace_reused",
+      surfaceId: "surface-reused",
+      rendererPid: null,
+      status: "active",
+      event: "created",
+      revision: 1,
+    },
+  });
   assert.equal(tab.helperPid, 222);
   assert.equal(tab.status, "running");
   assert.equal(tab.loading, true);

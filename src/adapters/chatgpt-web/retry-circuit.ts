@@ -26,6 +26,11 @@ interface RetryCircuitEntry {
   lastTouchedAt: number;
 }
 
+export interface StandaloneRetryReservation {
+  lineageId: string;
+  attempt: number;
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -154,7 +159,7 @@ export class StandaloneRetryCircuit {
     snapshot: unknown[],
     kind: StandaloneRetryKind = "default",
     lineageSize?: number,
-  ): void {
+  ): StandaloneRetryReservation {
     this.prune();
     const now = this.now();
     let entry = this.entryForExact(exactKey);
@@ -187,7 +192,7 @@ export class StandaloneRetryCircuit {
       }
       entry.attempts += 1;
       entry.state = "active";
-      return;
+      return { lineageId: entry.id, attempt: entry.attempts };
     }
 
     if (this.entries.size >= this.maxEntries) {
@@ -211,11 +216,12 @@ export class StandaloneRetryCircuit {
     };
     this.entries.set(id, created);
     this.exactToEntry.set(exactKey, id);
+    return { lineageId: id, attempt: 1 };
   }
 
-  noteFailure(exactKey: string, snapshot: unknown[], error: unknown): void {
+  noteFailure(exactKey: string, snapshot: unknown[], error: unknown): CircuitState | undefined {
     const entry = this.entryForExact(exactKey);
-    if (!entry) return;
+    if (!entry) return undefined;
     entry.lastTouchedAt = this.now();
     entry.lastSnapshot = snapshot;
     const message = error instanceof Error ? error.message : String(error);
@@ -230,20 +236,21 @@ export class StandaloneRetryCircuit {
       && error.code === "context_length_exceeded") {
       entry.attempts = Math.max(0, entry.attempts - 1);
       entry.state = "retryable-failed";
-      return;
+      return entry.state;
     }
 
     // Terminal entries are monotonic. In particular, cancelOutstanding() opens every retained
     // lineage before aborting its browser session; a failure callback from that already-reserved
     // browser attempt may arrive afterward. Keep its failure markers for descendant containment,
     // but never let that stale callback restore retry capacity.
-    if (entry.state === "open") return;
+    if (entry.state === "open") return entry.state;
 
     const retryable = error instanceof ChatGptWebAdapterError && error.retryable;
     const rateLimited = error instanceof ChatGptWebAdapterError && error.status === 429;
     entry.state = retryable && !rateLimited && entry.attempts < this.maxBrowserAttempts
       ? "retryable-failed"
       : "open";
+    return entry.state;
   }
 
   noteSuccess(exactKey: string): void {

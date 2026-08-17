@@ -93,8 +93,9 @@ class BrowserControlServer {
     const isTurn = request.url === "/v1/turn/start"
       || request.url === "/v1/turn/heartbeat"
       || request.url === "/v1/turn/end";
+    const isObservation = request.url === "/v1/observation/event";
     const isSessionInspect = request.url === "/v1/session/inspect";
-    if (request.method !== "POST" || (!isTurn && !isSessionInspect)) {
+    if (request.method !== "POST" || (!isTurn && !isSessionInspect && !isObservation)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -111,18 +112,30 @@ class BrowserControlServer {
         throw new Error("traceId is invalid");
       }
       if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
-        throw new Error("browser helper pid is invalid");
+        if (!isObservation) throw new Error("browser helper pid is invalid");
+      }
+      if (isObservation) {
+        if (typeof body.event !== "string" || !/^[A-Za-z0-9_.-]{1,120}$/.test(body.event)) {
+          throw new Error("observation event is invalid");
+        }
+        if (body.eventId !== undefined
+          && (typeof body.eventId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.eventId))) {
+          throw new Error("observation event id is invalid");
+        }
+        host.flightRecorder?.observe(body.traceId, body.event, body.eventId);
+        writeJson(response, 200, { ok: true });
+        return;
       }
       const preferences = this.getPreferences();
       if (request.url === "/v1/turn/start") {
         const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
-        this.logger.info("browser.turn_started", { traceId: body.traceId });
+        this.logger.info("browser.turn_started", { traceId: body.traceId, lifecycle: lease.lifecycle });
         writeJson(response, 200, { ok: true, ...lease });
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
-        host.heartbeatTurn(body.traceId, body.helperPid);
-        this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
-        writeJson(response, 200, { ok: true });
+        const lifecycle = host.heartbeatTurn(body.traceId, body.helperPid);
+        this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId, lifecycle });
+        writeJson(response, 200, { ok: true, lifecycle });
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");

@@ -14,6 +14,36 @@ import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./tur
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
+import { recordChatGptFlightEvent } from "../../observations/flight-recorder";
+
+const lastRetryTraceByLineage = new Map<string, string>();
+const retryLineageByExecutionKey = new Map<string, string>();
+
+function rememberRetryTrace(executionKey: string, lineageId: string, traceId: string): string | undefined {
+  const previous = lastRetryTraceByLineage.get(lineageId);
+  lastRetryTraceByLineage.delete(lineageId);
+  lastRetryTraceByLineage.set(lineageId, traceId);
+  retryLineageByExecutionKey.set(executionKey, lineageId);
+  while (lastRetryTraceByLineage.size > 256) {
+    const oldest = lastRetryTraceByLineage.keys().next();
+    if (oldest.done) break;
+    lastRetryTraceByLineage.delete(oldest.value);
+    for (const [key, candidate] of retryLineageByExecutionKey) {
+      if (candidate === oldest.value) retryLineageByExecutionKey.delete(key);
+    }
+  }
+  return previous;
+}
+
+function forgetSuccessfulRetryTrace(executionKey: string): void {
+  const lineageId = retryLineageByExecutionKey.get(executionKey);
+  if (!lineageId) return;
+  retryLineageByExecutionKey.delete(executionKey);
+  for (const [key, candidate] of retryLineageByExecutionKey) {
+    if (candidate === lineageId) retryLineageByExecutionKey.delete(key);
+  }
+  lastRetryTraceByLineage.delete(lineageId);
+}
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -171,10 +201,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
   const connectorName = provider.chatgptWeb?.appName?.trim() || CHATGPT_CONNECTOR_NAME;
-  const executionNamespace = createHash("sha256").update(JSON.stringify({
-    baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
-  })).digest("hex");
+  const executionNamespace = chatGptWebExecutionNamespace(provider);
   const environmentStore = new ChatGptThreadEnvironmentStore(
     provider.chatgptWeb?.threadEnvironmentStatePath
       ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
@@ -298,9 +325,20 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
         await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
-      const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+      const { executionKey, executionKeyHash, traceId } = chatGptWebExecutionIdentity(provider, parsed);
       await chatGptTurnSessions.waitForRetirement(executionKey);
-      const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+      const agentSessionId = incoming.headers.get("agent-session-id")?.trim() || undefined;
+      recordChatGptFlightEvent({
+        category: "request",
+        event: "adapter-request-bound",
+        traceId,
+        requestId: incoming.flightRequestId,
+        executionKeyHash,
+        ...(agentSessionId ? { agentSessionId } : {}),
+        model: parsed.modelId,
+        effort: parsed.options.reasoning ?? "default",
+        activeBrowserTurns: chatGptTurnSessions.activeCount(),
+      });
       const gooseCompactionSessionId = parsed._gooseCompactionRequest
         ? incoming.headers.get("agent-session-id")?.trim() || undefined
         : undefined;
@@ -324,19 +362,44 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               // Reserve only when the exact-key session registry is about to create a real browser
               // runtime. Exact duplicate HTTP requests and tool continuations reuse the existing
               // session and therefore cannot spend retry budget.
-              standaloneRetryCircuit.reserve(
+              const reservation = standaloneRetryCircuit.reserve(
                 retryScope,
                 executionKey,
                 retrySnapshot,
                 retryKind,
                 gooseCompactionLineageSize,
               );
+              const previousTraceId = rememberRetryTrace(executionKey, reservation.lineageId, traceId);
+              recordChatGptFlightEvent({
+                category: "retry",
+                event: "retry-reserved",
+                traceId,
+                lineageId: reservation.lineageId,
+                attempt: reservation.attempt,
+                ...(previousTraceId ? { previousTraceId } : {}),
+              });
+              if (previousTraceId && previousTraceId !== traceId) {
+                recordChatGptFlightEvent({
+                  category: "retry",
+                  event: "retry-replacement-linked",
+                  traceId: previousTraceId,
+                  lineageId: reservation.lineageId,
+                  replacementTraceId: traceId,
+                });
+              }
             }
             return startRuntime(parsed, environment, traceId, turnCapabilities);
           },
         );
       } catch (error) {
         if (error instanceof ChatGptWebAdapterError) {
+          if (error.code === "chatgpt_retry_circuit_open") {
+            recordChatGptFlightEvent({
+              category: "retry", event: "retry-circuit-open", traceId,
+              requestId: incoming.flightRequestId,
+              errorClassification: error.code,
+            });
+          }
           emit({
             type: "error",
             message: error.message,
@@ -378,7 +441,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setFinalEvents(events);
             }
             emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
-            if (standaloneGoose) standaloneRetryCircuit.noteSuccess(executionKey);
+            if (standaloneGoose) {
+              standaloneRetryCircuit.noteSuccess(executionKey);
+              forgetSuccessfulRetryTrace(executionKey);
+              recordChatGptFlightEvent({ category: "retry", event: "retry-success", traceId });
+            }
             return;
           }
 
@@ -466,7 +533,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                   estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
-                if (standaloneGoose) standaloneRetryCircuit.noteSuccess(executionKey);
+                if (standaloneGoose) {
+                  standaloneRetryCircuit.noteSuccess(executionKey);
+                  forgetSuccessfulRetryTrace(executionKey);
+                  recordChatGptFlightEvent({ category: "retry", event: "retry-success", traceId });
+                }
                 return;
               }
               if (!turnToken || session.runtime.mode !== "tools") {
@@ -488,13 +559,35 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         });
       } catch (error) {
         if (standaloneGoose && retrySnapshot) {
-          standaloneRetryCircuit.noteFailure(executionKey, retrySnapshot, error);
+          const retryState = standaloneRetryCircuit.noteFailure(executionKey, retrySnapshot, error);
+          recordChatGptFlightEvent({
+            category: "retry",
+            event: "retry-failure",
+            traceId,
+            requestId: incoming.flightRequestId,
+            retryable: error instanceof ChatGptWebAdapterError && error.retryable,
+            ...(retryState ? { circuitState: retryState } : {}),
+            errorClassification: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
+          });
+          if (retryState === "open") {
+            recordChatGptFlightEvent({
+              category: "retry", event: "retry-circuit-open", traceId,
+              requestId: incoming.flightRequestId,
+              errorClassification: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
+            });
+          }
         }
         if (error instanceof ChatGptWebAdapterError && error.retryable) {
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
           chatGptTurnSessions.retire(executionKey, session);
+          recordChatGptFlightEvent({
+            category: "retry",
+            event: "turn-session-retired",
+            traceId,
+            retryable: true,
+          });
         } else {
           session.cancel();
         }
@@ -517,5 +610,24 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         clearInterval(heartbeat);
       }
     },
+  };
+}
+
+export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
+  return createHash("sha256").update(JSON.stringify({
+    baseUrl: provider.baseUrl,
+    chatgptWeb: provider.chatgptWeb ?? {},
+  })).digest("hex");
+}
+
+export function chatGptWebExecutionIdentity(
+  provider: CodexProviderConfig,
+  parsed: CodexParsedRequest,
+): { executionKey: string; executionKeyHash: string; traceId: string } {
+  const executionKey = `${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(parsed)}`;
+  return {
+    executionKey,
+    executionKeyHash: createHash("sha256").update(executionKey).digest("hex"),
+    traceId: createHash("sha256").update(executionKey).digest("hex").slice(0, 12),
   };
 }
