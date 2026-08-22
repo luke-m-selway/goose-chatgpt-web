@@ -1,260 +1,226 @@
-# CGW foundation-first implementation plan — 2026-08-21
+# CGW foundation-first implementation plan — current state after 2026-08-22 closeout
 
-## Purpose
+## Purpose and authority
 
-This document is the current implementation-order authority for the `goose-chatgpt-web` reliability workstream.
+This document is the current **implementation-order/planning authority** for the `goose-chatgpt-web` reliability workstream.
 
-It replaces the stale execution ordering in draft PR #31 without discarding PR #31's incident history. PR #31 remains the chronological evidence/forensics ledger; this document defines what should be implemented and requalified next, and in what dependency order.
+PR #31 remains the chronological incident/evidence ledger. Historical failures, traces and reconstruction details belong there and in its timestamped comments; this document intentionally does not duplicate that evidence trail.
 
-The objective is to stabilise the lowest-level correctness contracts first so higher-level continuation, large-context and concurrency qualification are not repeatedly invalidated by later changes to foundational browser/provider semantics.
+The remote planning branch is documentation-only and does not reconcile or contain the materially advanced local `fix/electron-native-liveness` lineage.
 
-## Current runtime checkpoint
+## Current local implementation checkpoint
 
-The currently activated local development runtime is:
+Current local checkpoint:
 
-`38de8c0e9773210f54f6a32a965251e6f3f43bb5`
+`64f006bed52b0c3366178c3be11f71acf1c397c2`
 
-Activation and one ordinary non-Goose-Control ChatGPT-Web/high smoke passed on 2026-08-21:
-
-- daemon, BrowserHost and tunnel restarted canonically with one owned instance each;
-- BrowserHost authenticated and runtime observation enabled;
-- Goose session `20260821_9`, ChatGPT trace `856fd7eb9e92`;
-- one harmless Goose Native `pwd` tool round completed;
-- final assistant result persisted;
-- runtime returned to `active_http_turns=0`, `active_browser_turns=0`.
-
-`38de8c0` is therefore the ecological-use checkpoint while the remaining foundations are repaired. It is a local checkpoint and must not be inferred from the stale remote PR #31 head.
+This is the latest completed local foundation checkpoint known to this plan. It is recorded as local implementation evidence only; do not infer that this documentation branch contains that SHA.
 
 ## Architecture invariants
 
-Do not change these without new contradictory evidence:
+Unless new contradictory evidence appears:
 
 1. Goose owns durable logical session/history, tools, orchestration, cancellation and context lifecycle.
-2. A genuinely new human turn gets a fresh provider execution and fresh ChatGPT Temporary Chat.
+2. A genuinely new human turn gets fresh provider execution and a fresh ChatGPT Temporary Chat; prompt-content equality is not an idempotency contract.
 3. Exact transport retries and tool-result rounds of the same owning turn may retain that turn's execution identity.
-4. Prompt-content equality is not an idempotency contract.
-5. Independently owned Goose operations may overlap under one `agent-session-id`; do not serialize by Goose session identity.
-6. Browser/Temporary-Chat state is disposable and must not become canonical conversation state.
-7. Electron/BrowserHost native lifecycle evidence outranks DOM/Playwright symptoms for renderer/surface liveness.
-8. Passive observability must never acquire request-blocking authority. Electron `webRequest` observers must continue intercepted requests.
-9. Do not solve liveness failures by casually increasing the existing 40s composer, 45s helper-silence, 60s orphan or 5s BrowserHost/control budgets.
-10. Keep the current Goose → Responses daemon → Electron BrowserHost → Node helper + Playwright/CDP topology unless substantially stronger evidence requires redesign.
+4. Independently owned Goose operations may overlap; do not serialize by `agent-session-id` merely to eliminate multiple surfaces.
+5. Browser/Temporary-Chat state is disposable and must not become canonical conversation state.
+6. Electron/BrowserHost native lifecycle/network evidence outranks weak DOM/Playwright symptoms where native evidence is available.
+7. Passive observability must not acquire request-blocking authority.
+8. Do not solve liveness/control failures by casually inflating existing timeout budgets.
+9. Keep the Goose → Responses daemon → Electron BrowserHost → helper/Playwright topology unless substantially stronger evidence requires redesign.
 
-## Corrected interpretation of continuation and duplicate surfaces
+## Foundation gates — completed
 
-Do not treat historical two-surface observations as proof of a same-session continuation-state defect.
+The earlier future-tense Gates 1–4 and CGW-013 instructions are superseded by the completed state below.
 
-At the current checkpoint, source and passive evidence show that the strongest recorded duplicate-surface pairs were legitimate Goose-owned concurrency: the ordinary provider request overlapped background `complete_fast` tool-pair summarisation under the same `agent-session-id`, with distinct execution keys and retry lineages.
+### CGW-009 — CLOSED / live-proved
 
-The continuation identity contract is therefore not the current repair target. Do not add an `agent-session-id` mutex, one-surface rule, supersession rule or continuation-specific serialization.
+Final matcher checkpoint in the local lineage:
 
-The remaining continuation-adjacent failures are lower-level send/completion/streaming failures that must be repaired first and then requalified through an ordinary second human turn.
+`a16c51a25866c84f209e6df09bc521c2c051461e`
 
-## Current status snapshot
+The provider now has exact-once submission semantics based on Electron-native evidence. The live-proved current ChatGPT submission route is:
 
-### Resolved / observe
+`POST /backend-api/f/conversation`
 
-- **CGW-001 — Goose Native connector activation:** full configured mention selection, catalog filtering, rerender recovery and positive connector verification are implemented and live-proven.
-- **CGW-002 — content-keyed execution identity:** fixed and live-qualified. Separate Goose sessions with byte-identical prompts receive distinct provider execution identities; same-turn tool continuation remains stable.
-- **CGW-003 — transient pre-lease failure replay:** repaired so transient BrowserHost availability failures do not poison a settled exact-key entry for the registry TTL.
-- **CGW-004 — duplicate surfaces interpreted as same-session defect:** strongest cases are now classified as legitimate Goose-owned concurrency, not a defect requiring session serialization.
-- **CGW-005 — runtime recovery mechanism:** supported `cancel-turns` recovery is implemented and repeatedly proven operationally; the reusable recovery skill should receive its final ecological qualification only on the next genuine retained-turn incident rather than via a manufactured failure.
-- **Connector/menu timeout-accounting and shared-helper sibling containment:** repaired and deterministically covered.
-- **Bounded native liveness architecture:** per-surface native generation evidence, heartbeat retire/replace, generation-aware orphan reaping and bounded turn lifetime are present in the local lineage.
-- **Critical hydration regression:** fixed by restoring mandatory `webRequest` request continuation.
+Acceptance authority requires the exact owned request, send epoch/causal sequencing, matching Electron request ID and matching 2xx response-start. `/backend-api/conversation/init`, `/backend-api/f/conversation/prepare` and sibling routes do not qualify. Exactly-one-Enter behavior was live-proved.
 
-### Open / active
+### Gate 2A — CLOSED / live-qualified
 
-- **CGW-009 — send acknowledgement indeterminacy:** ChatGPT may accept/start a prompt while Playwright `sendButton.press("Enter")` remains unresolved and later times out. A safe fix requires an authoritative native signal for the exact owned submission, or an explicit indeterminate-after-dispatch state that prohibits automatic resubmission.
-- **Completion/terminal interpretation — Incident B:** native generation can settle, broker/tool work can be complete and the surface remain responsive while the current sole accepted terminal action (`copy-turn-action-button`) is absent. `38de8c0` now captures decision-grade screenshot/control/native-generation/broker evidence on the next natural recurrence. Do not broaden completion semantics without that evidence.
-- **Semantic stream mutation:** a long single-agent session failed because ChatGPT changed/resegmented text already treated as completed and streamed outward. Transcript correctness must remain fail-closed, but the bridge needs a semantic strategy that tolerates legitimate DOM rerender/resegmentation without silently corrupting output.
-- **CGW-017 — live-but-no-progress DOM/control stall:** the original defect was real, but later native-liveness work materially changed its failure envelope. It requires explicit current-HEAD reconciliation before it can be called closed.
-- **CGW-007 / Incident A — broker responsiveness:** recovered failure is a five-second broker `claim` response timeout before child-B provider/browser creation. `38de8c0` now reports broker method and response phase; the broker-internal cause remains open.
-- **CGW-006 — ~600s healthy-stream abort:** root cause is proven in Goose's OpenAI provider absolute reqwest request lifetime. The correct repair belongs in the streaming transport policy, not BrowserHost timeouts.
-- **CGW-010 — large-context context-feed:** implemented and partially live-proven, but not fully qualified end-to-end.
-- **CGW-013 — routine verification launches browser work:** ordinary `bun run verify` still needs to be made deterministic/browser-free, with managed-Chrome/browser compatibility smoke moved behind an explicit deliberate command.
-- **CGW-014 — parent + two ChatGPT-Web children:** topology and reliable completion were proven on earlier checkpoints, including 102.646s genuine three-way overlap at `c8876d6`, but current-HEAD requalification is required after the subsequent foundational changes.
+Checkpoint:
 
-## Foundation-first implementation order
+`f0961960d210776a7498cd7b0b78318a9fdc5e1a`
 
-The following order is normative unless new evidence proves a dependency is wrong.
+Completed-stream reconciliation no longer relies on positional DOM block identity. The buffer uses cumulative semantic-Markdown prefix/coverage semantics, tolerates benign DOM split/merge/reparent/index churn, preserves meaningful whitespace and atextual Markdown, never retransmits committed output, and still fails closed on genuine committed semantic mutation/removal with bounded privacy-safe divergence evidence.
 
-### Gate 1 — establish exact-once submission semantics (CGW-009)
+Normal operation was live-qualified after activation.
 
-First determine and, if evidence permits, implement the smallest authoritative submission-acceptance contract.
+### Gate 2B / Incident B — CLOSED / qualified
 
-Required invariant:
+Checkpoint:
 
-- if ChatGPT has accepted the exact owned submission, a stalled Playwright Enter acknowledgement must never trigger a second Enter;
-- if submission genuinely did not occur, the original causal failure must remain visible;
-- weak correlation such as generic navigation, renderer activity or generation-like UI changes must not be promoted to acceptance authority without proof.
+`d9a16e4af44be4fbb147c9bc7bb365972d375f26`
 
-Prefer an already-existing Electron/BrowserHost/native signal. If none is specific enough, add only the smallest additional native event required.
+The observed “missing completion action” recurrence was proven to expose the exact response-turn control:
 
-Do not proceed to qualification-heavy work while this contract remains ambiguous.
+`button[data-testid="regenerate-thread-error-button"]`
 
-### Gate 2 — stabilise output and completion semantics
+That state is now recognized as a retryable ChatGPT thread-error terminal rather than being left to the generic 60-second missing-completion-action watchdog. Partial already-streamed output remains irreversible; the final error stub is not committed as answer text. Normal-operation qualification passed with no false positive.
 
-Resolve or decisively classify the two single-agent post-send correctness failures:
+A hypothetical successful settled answer with neither completion action nor thread-error control has not been observed under current instrumentation; existing watchdog evidence remains sufficient if it occurs naturally.
 
-1. generation settled but the expected completion action was absent (Incident B);
-2. ChatGPT rerendered/resegmented text already emitted as completed (`ChatGPT changed a completed text block that was already streamed to Codex`).
+### CGW-017 — CLOSED / live-qualified
 
-The implementation must preserve transcript correctness. Do not simply weaken mutation/corruption guards or accept arbitrary stable text as completion.
+Checkpoint:
 
-Use semantic/structural reconciliation where possible rather than DOM-node identity as a durable output identity.
+`136a3bf828e0e4c3d8238bc5089857c1237af204`
 
-Incident B should be fixed only when the activated `38de8c0` evidence from a natural recurrence is sufficient to distinguish a valid settled post-tool terminal state from a parked/incomplete tool round.
+The remaining readable-but-false-running liveness class is bounded.
 
-### Gate 3 — reconcile CGW-017 with the current native-liveness model
+- Adapter `{type:"heartbeat"}` events no longer reset the generic bridge's semantic-progress stall budget.
+- Bridge-generated `response.heartbeat` client keepalives remain intact.
+- Genuine text/reasoning/tool/web-search progress still renews the budget, so there is no absolute generation lifetime.
+- `running=true` + connection-interrupted evidence + static progress for the bounded interval now produces the classified retryable terminal `chatgpt_upstream_connection_interrupted_stall`.
+- The earlier continuously-unreadable-response bound remains intact.
 
-Review the original live-but-no-progress failure against the later native-generation, heartbeat replacement, generation-aware orphan and absolute-lifetime semantics.
+Normal operation was live-qualified on this checkpoint.
 
-Conclude one of:
+### CGW-013 — CLOSED
 
-- fixed by the newer architecture and deterministically covered;
-- partially fixed with one remaining invariant;
-- still open with a current reproduction/evidence requirement.
+Current local checkpoint:
 
-Do not retain a stale CGW-017 status merely because its original implementation predates the current architecture.
+`64f006bed52b0c3366178c3be11f71acf1c397c2`
 
-### Gate 4 — make the verification harness hermetic (CGW-013)
+Ordinary `bun run verify` is now browser/runtime-hermetic. It retains deterministic unit/type/build/runtime-bundle/notices/relocated-daemon release smoke work, but does not launch or discover real Chrome/Electron/BrowserHost or authenticated ChatGPT state.
 
-Before the next major qualification cycle, make ordinary `bun run verify` deterministic and browser-free.
+Managed-Chrome compatibility remains explicit behind:
 
-Requirements:
+`bun run smoke:managed-chrome`
 
-- unit/contract/type/build/release-smoke verification must not create headed managed-Chrome/browser state by default;
-- retain managed-Chrome/browser compatibility testing behind an explicit deliberate qualification/CI/release command;
-- preserve the support contract rather than silently deleting compatibility coverage.
+and is deliberately exercised in macOS CI/release. `bun audit` and dependency installation remain documented network-dependent steps; CGW-013 did not redefine ordinary verification as fully offline.
 
-This is infrastructure hygiene for all subsequent reliability work: the test harness must not perturb the browser system it is validating unless explicitly requested.
+## Active next foundation item
 
-### Gate 5 — finish broker admission/responsiveness semantics (CGW-007 / Incident A)
+### CGW-007 / Incident A — DESIGN-READY / NEXT
 
-Use the new broker method/phase evidence on any natural recurrence. If the recovered condition repeats as `method=claim, phase=response-start`, localize why the broker socket connected and the request was written but no complete response began within the existing five-second control boundary.
+Read-only Ox Alpha prescope has made this implementation-ready.
 
-Do not classify parent+2 failures as BrowserHost-capacity failures while child creation can still fail before provider/browser creation at this broker boundary.
+Important correction to older speculation: broker `claim` does **not** wait for invocation availability, EOF/read-first state, queue work, outstanding tool delivery or a lock/semaphore. The current claim path validates the token, creates or reuses its binding and returns synchronously.
 
-Do not increase the five-second broker deadline or add blind retries as the first repair.
+The approximately five-second timeout is client-side in `callTurnBroker()` and acts as a broker-path liveness detector. Incident A therefore represents delayed broker response service before child provider/browser creation, not BrowserHost capacity exhaustion.
 
-### Gate 6 — repair Goose's streaming lifetime semantics (CGW-006)
+Most likely mechanism: transient daemon event-loop/service starvation under concurrent activity. The exact starvation trigger remains unlocalized.
 
-Patch the owning Goose OpenAI/Responses streaming transport so healthy streaming bodies are not killed by an absolute total-request deadline.
+Implementation contract:
 
-Preferred contract:
+1. Preserve prompt-return, idempotent claim semantics.
+2. Add a **bounded idempotent-safe retry for claim only** on the appropriate response timeout classes; no polling loop and no global timeout inflation.
+3. Add bounded scalar claim latency/state telemetry sufficient to distinguish connect, response-start and response-settlement delay and to correlate token/binding/queue/invocation state.
+4. Optional cheap daemon event-loop lag telemetry is acceptable if it remains observation-only and materially improves localization.
+5. Do not alter `nextToolBatch`, tool-delivery exact-once semantics, context staging/EOF semantics or intentional non-TTL invoke waiting.
 
-- no absolute total response-body lifetime deadline for streaming Responses;
+CGW-007 should be implemented and deterministically validated before moving to CGW-006.
+
+## Following foundation item
+
+### CGW-006 — healthy streaming lifetime
+
+The root cause is already established in Goose's custom OpenAI/Responses provider: the default ~600-second timeout is applied as an absolute reqwest request/body lifetime.
+
+Required contract:
+
+- no absolute total response-body lifetime for a healthy streaming Responses request;
 - explicit caller cancellation remains authoritative;
 - connection/setup bounds may remain;
-- if a stalled-stream bound is needed, it must be a genuine inactivity/read policy that resets after successful reads;
-- non-streaming timeout semantics remain unchanged;
-- preserve underlying reqwest/network error causality.
+- any stalled-stream bound must be genuine inactivity/read/progress semantics that reset on successful reads;
+- non-streaming timeout behavior remains unchanged;
+- preserve underlying network/reqwest causality.
 
-Proof must be hermetic and scaled with a local SSE server; do not use a 600-second wall-clock ChatGPT test.
+Proof should be hermetic and scaled with a local SSE server; do not use a 600-second wall-clock ChatGPT run and do not replace 600 seconds with an arbitrarily huge absolute timeout.
 
-This gate must be complete before long-duration orchestration is considered qualified, even though it is independent of the current short send/completion defects.
+CGW-006 is expected to be the final major known foundation correctness fix before the qualification sequence below.
 
-### Gate 7 — current-HEAD single-agent qualification
+## Qualification sequence after CGW-006
 
-Once Gates 1–6 that affect the ordinary provider path are stable, run the smallest useful qualification sequence:
+The following order remains normative unless new evidence changes a dependency.
 
-1. fresh ordinary ChatGPT-Web/high turn;
-2. harmless Goose Native tool round;
-3. final assistant completion;
-4. a genuine second human turn in the same Goose session;
-5. another useful bounded tool/completion round;
-6. clean settlement to `active_http_turns=0`, `active_browser_turns=0`.
+### 1. Current-HEAD single-agent qualification
 
-This is the point where ChatGPT-Web continuation can again be called operationally qualified. The test is not looking for browser-state reuse; it proves that fresh per-turn provider execution works reliably while Goose-owned history is replayed.
+Run an ordinary ChatGPT-Web/high session that proves:
 
-### Gate 8 — finish CGW-010 large-context qualification
+1. fresh human turn;
+2. useful Goose Native tool round;
+3. normal final completion;
+4. a **genuine second human turn in the same Goose session**;
+5. another bounded useful tool/completion round;
+6. clean settlement to HTTP/browser `0/0`.
 
-Do not redesign CGW-010 before completing the lower-level gates.
+This is the point where ordinary same-Goose-session multi-turn operation is requalified on the accumulated foundation fixes.
 
-Existing live evidence already proves the core feed mechanics:
+### 2. CGW-010 large-context qualification
 
-- one real context feed installed;
-- 19,684 UTF-16 characters loaded as `0→16000→19684`;
-- final `eof=true` before normal task tools;
-- useful post-EOF work occurred.
+Resume the existing PR #32 workstream at its remaining qualification gate rather than redesigning the context feed.
 
-Remaining qualification should prove clean turn settlement, dependent later continuation using earlier-session facts, and a small inline control. Then stage useful parent+1, parent+2 and Goose-Control-path evidence rather than manufacturing context padding.
+Already-proven mechanics include a real ~19,684-character feed loaded `0 → 16000 → 19684`, EOF before normal task tools, and useful post-EOF work. Remaining qualification should prove clean settlement, dependent later continuation using earlier-session facts, and the small inline control.
 
-### Gate 9 — concurrency requalification
+### 3. Manual concurrency requalification
 
-Only after the single-agent path and broker foundation are sound:
+On current hardened HEAD:
 
-1. manual/ordinary parent + 1 ChatGPT-Web child;
-2. Goose-Control-started parent + 1;
-3. current-HEAD parent + 2.
+1. ordinary/manual parent + 1 ChatGPT-Web child;
+2. ordinary/manual parent + 2 ChatGPT-Web children.
 
-Parent+2 is a regression qualification, not an architecture experiment: the topology is already proven viable. Preserve one-parent-plus-two-child as the target normal maximum; parent+3 remains rare/non-gating research.
+The topology has already been proven viable historically; this is regression qualification, not architecture discovery. Do not optimize for unnecessary fan-out beyond the realistic operating envelope.
 
-A concurrency failure must first be classified against submission, completion, liveness, broker and Goose-streaming foundations before changing the concurrency architecture.
+### 4. Goose Control route qualification
 
-### Gate 10 — Goose Control route repeatability
+Only after the ordinary provider path is stable:
 
-Goose Control is the orchestration/control plane, not a BrowserHost owner. Qualify it after the ordinary Goose provider path is stable so GC failures are not confounded with provider foundations.
+1. repeated fresh GC-started ChatGPT-Web turns;
+2. GC parent + 1;
+3. GC parent + 2.
 
-Required progression:
+Keep Goose Control/ACP/session-list defects separate from ChatGPT-Web BrowserHost/provider failures.
 
-- repeated fresh GC-started ChatGPT-Web first turns without retry;
-- GC parent+1 after ordinary parent+1 passes;
-- GC parent+2 only after current-HEAD ordinary parent+2 passes.
+### 5. Deferred recovery/lifecycle/resource work
 
-Keep Day Shift/Goose-Control ACP/session-list defects separate from ChatGPT-Web BrowserHost failures.
-
-## Deferred / non-gating work
-
-Do not interrupt the foundation sequence for these unless new evidence makes one causal:
+Then revisit only as evidence/priority warrants:
 
 - CGW-005 final ecological recovery-skill qualification;
-- CGW-008 ChatGPT-native `Connection interrupted` observation;
 - CGW-011 provider-demand BrowserHost/lifecycle design;
-- CGW-012 actual macOS reboot/login reconstruction proof;
-- parent+3/stress testing;
-- Electron/helper RAM/resource-efficiency attribution;
-- larger Opus simplification backlog such as event-driven DOM observation or renderer-independent surface metadata;
-- broad topology redesign;
-- PR #32 architectural redesign beyond the already-implemented context-feed candidate.
+- CGW-012 actual reboot/login reconstruction proof;
+- Electron/helper memory/resource attribution;
+- parent+3/stress work;
+- larger simplification/backlog items.
 
-## Agent and cost-routing policy for this workstream
+## Operational and agent-routing posture
 
-Use the cheapest model that preserves correctness:
-
-1. **ChatGPT-Web fresh session** — source reading, passive evidence reconstruction, design/scoping, semantic review, deterministic test planning. ChatGPT-Web continuation is not assumed operationally qualified until Gate 7 passes.
-2. **Codex GPT-5.6 Luna / Low** — default implementation, focused tests, mechanical validation, activation procedure when bounded.
-3. **Terra / Medium** — only when implementation still requires meaningful judgment across interacting paths after ChatGPT-Web scoping.
-4. **Sol / Medium** — exceptional difficult/open-ended implementation where the lower tiers are insufficient.
-5. **Claude/Sonnet/Opus** — independent cross-family review or rescue only when materially justified; Codex is not a cross-family de-anchoring step for ChatGPT/Codex reasoning.
-
-Avoid Fast mode by default when conserving Codex quota.
+- ChatGPT-Web **High** is the default ChatGPT-Web implementation model; Medium is only preferred when speed/latency specifically matters.
+- Use ChatGPT-Web where success/failure itself gives meaningful ecological evidence about ChatGPT-Web.
+- Use Ox Alpha for source forensics, recovery, implementation and qualification where ChatGPT-Web is merely instrumental.
+- If a ChatGPT-Web Goose turn fails after potentially doing useful source work, prefer switching that **same Goose session** to Ox Alpha for recovery rather than repeatedly restarting.
+- Opus is a limited-usage escalation/review resource when competent Ox passes fail to converge, diagnoses conflict, work is cycling, or a high-risk semantic/diff review merits the cost.
+- One ChatGPT-Web agent at a time.
+- Avoid unnecessary parallel heavy local workloads while the hypothesis that MBP load amplifies Electron/Playwright latency remains unproven but plausible.
 
 ## Qualification discipline
 
-- Prefer natural useful/ecological workloads after deterministic coverage is in place.
-- Do not manufacture Incident B, retained-turn spinout or rare watchdog branches merely to collect evidence.
-- Do not retry a failing qualification until its failure is classified; one unclassified retry can destroy causal evidence.
-- Keep one exact acceptance criterion per gate.
-- A higher-level pass is not final if a lower-level foundation later changes materially; requalify only the dependent layers affected by that change.
-- Preserve negative controls, failure causality and privacy-safe telemetry.
-- Do not treat harness/OpenAI safety-policy blocks as BrowserHost failures without direct evidence.
+- Prefer natural useful/ecological workloads after deterministic coverage exists.
+- Do not manufacture rare failure branches merely to collect evidence unless qualification explicitly requires it.
+- Do not retry an unclassified qualification failure merely to obtain a pass.
+- Preserve exact gate acceptance criteria, failure causality and privacy-safe evidence.
+- A higher-level pass may require requalification when a lower-level foundation changes materially.
+- Harness/tool-policy blocks are not BrowserHost failures without direct evidence.
 
 ## Branch and PR relationship
 
-This planning PR intentionally starts from current `main` and contains documentation only.
+This planning PR remains documentation-only and intentionally starts from `main`.
 
-It does **not** reconcile or overwrite the materially advanced local `fix/electron-native-liveness` lineage, and it does not imply that local checkpoints such as `38de8c0` exist on this remote branch.
+It does **not** reconcile, push or overwrite the local `fix/electron-native-liveness` implementation lineage. Local checkpoint `64f006bed52b0c3366178c3be11f71acf1c397c2` is a recorded planning reference, not a commit on this documentation branch.
 
-PR #31 should remain open as the chronological incident/evidence ledger until deliberate branch reconciliation. Its stale body/order should no longer be used as the current implementation plan; link future status updates back to this document.
+PR #31 remains open as the chronological incident/evidence ledger. Its older body is historical context and must not override this current planning document or the newer timestamped closeout comments.
 
-PR #32 remains the dedicated CGW-010 design/evidence stream and should follow Gate 8 rather than driving lower-level BrowserHost fixes.
+PR #32 remains the dedicated CGW-010 design/evidence stream and resumes only at the large-context qualification stage above.
 
-Before final merge/closeout of the reliability workstream:
-
-1. reconcile the local implementation lineage and remote PR history deliberately;
-2. preserve protected local scripts and intentional working-tree state;
-3. run exact-final-HEAD verification after all required gates;
-4. update canonical CGW statuses from actual qualification evidence;
-5. only then make the human draft-ready/merge/close decision.
+Before eventual final merge/closeout of the reliability workstream, deliberately reconcile local implementation history with remote PR history, preserve protected local scripts/intentional state, verify exact final HEAD, update canonical statuses from actual evidence, and leave merge/close decisions to the human operator.
