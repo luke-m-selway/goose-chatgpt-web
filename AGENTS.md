@@ -44,7 +44,7 @@ The earlier permanent prohibition on Electron supervising daemon/tunnel is super
 
 Implementation must be parallel and rollback-capable. Keep the current external path available while integrated launcher ownership is developed and qualified.
 
-The reviewed Phase-1 design requires an explicit persisted config fact such as:
+The reviewed Phase-1 design requires explicit persisted ownership:
 
 ```text
 runtimeOwner = external | launcher
@@ -57,24 +57,40 @@ Rules:
 - Never infer ownership from an environment flag, process absence, port availability, tunnel alias, or stale launcher state alone.
 - Never silently take over the rollback stack.
 
-Initial launcher-owned startup target after BrowserHost exists is:
+## Health, admission and READY are different contracts
+
+Do not put BrowserHost state into daemon `/healthz` or `proxyHealth`.
+
+- `/healthz` remains process/runtime identity evidence used by ownership and lifecycle code.
+- `accepting_turns` remains the existing drain/resume signal only.
+- a distinct supervisor-owned `turns_enabled` gate controls whether `/v1/responses` and `/v1/responses/compact` admit new work.
+- `/v1/models` stays available while `turns_enabled=false`.
+- Electron/`RuntimeSupervisor` owns aggregate application READY.
+- every actual browser turn still performs point-of-use BrowserHost descriptor/process validation.
+
+Required launcher startup sequence:
 
 ```text
-qualified BrowserHost startup proof
-  → Responses daemon ready (broker exists)
-    → Secure MCP Tunnel ready
-      → aggregate application READY
+ownership gate
+→ daemon starts with turns_enabled=false
+→ broker socket exists / daemon identity proven
+→ shared qualified BrowserHost startup proof
+→ Secure MCP Tunnel ready (full mode)
+→ /admin/enable
+→ aggregate application READY
 ```
 
-Ongoing readiness must include a bounded BrowserHost-ready predicate; daemon process liveness alone is not provider readiness.
+Do not enable turns before the BrowserHost proof and required tunnel readiness pass.
 
 ## Recovery and quit rules for Phase 1
 
-- Do not enable automatic daemon restart in the initial integrated slice. A daemon failure while a BrowserHost tab survives can lose in-daemon exact-once/retry state and make same-execution retry unsafe.
-- Do not restart tunnel/daemon underneath active HTTP/browser/tool turns. Non-idempotent Goose Native calls must never be replayed or invalidated by an automatic tunnel restart.
-- Initial integrated failure handling should degrade/fail closed and use the application as the restart boundary.
+- Do not enable broad automatic daemon restart in initial launcher qualification. If daemon recovery is later enabled it must restart with `turns_enabled=false`, rerun the BrowserHost proof and required tunnel readiness, then enable.
+- Do not restart the tunnel underneath active HTTP/browser/tool turns. Any later tunnel recovery must disable admission, drain to idle, restart, wait ready, then enable.
+- Initial integrated failure handling should degrade/fail closed and may use the application as the normal restart boundary.
 - In `external` ownership mode, application quit must leave the external daemon/tunnel stack untouched.
-- In `launcher` ownership mode, quit must make a bounded drain attempt and then terminate only positively owned children within a hard deadline before exiting. Do not cancel quit indefinitely and leave detached children orphaned.
+- In `launcher` ownership mode, ordinary UI Quit with active work should refuse cleanly and offer explicit Cancel-and-Quit through the existing cancellation path.
+- OS logout/reboot/SIGTERM must not refuse indefinitely: disable → bounded drain → cancel-browser-turns on expiry → graceful shutdown → hard-deadline cleanup of positively owned children → BrowserHost/descriptor cleanup → exit.
+- Repeated termination signals must remain cleanup-capable so detached children are not orphaned.
 
 ## BrowserHost readiness proof boundary
 
@@ -89,7 +105,7 @@ The qualified startup proof remains:
 
 Share/reuse this proof across external and launcher-owned startup rather than cloning it. Bun-direct Playwright/CDP is not authoritative readiness evidence.
 
-Continuous health must use a bounded non-destructive BrowserHost readiness probe; do not run the full disposable-surface smoke on every `/healthz` request.
+Do not turn that full proof into a health poll. The daemon must not poll Electron for lifecycle health.
 
 ## Autostart migration boundary
 
@@ -107,7 +123,8 @@ The eventual reboot proof must use a packaged build and exactly one login-visibl
 - residual transport-terminal execution retirement;
 - execution identity and retry-circuit ownership;
 - turn-scoped Goose Native capability/tool continuation;
-- task-bound browser-surface cleanup.
+- task-bound browser-surface cleanup;
+- cancel-before-retire ordering across transport-terminal shutdown where possible.
 
 A lifecycle/autostart proof launched from an active BrowserHost-backed turn can interfere with the runtime carrying that same turn. Perform lifecycle/cutover qualification from an external/operator-safe boundary.
 
