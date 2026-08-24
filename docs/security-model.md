@@ -65,13 +65,35 @@ Consolidation must not expose more authority to remote ChatGPT content:
 
 The future trust boundary is one trusted ChatGPT-Web application containing narrower internal components, not a privileged remote page.
 
-## Readiness is safety-relevant
+## Lifecycle health, provider admission and application readiness
 
-Daemon process liveness is not sufficient provider health. A dead/stale BrowserHost with a live daemon must not be advertised as healthy.
+These are deliberately separate security/control concepts.
 
-Startup uses the existing qualified disposable-surface/helper proof. Ongoing health must use a bounded non-destructive BrowserHost-ready predicate and combine it with daemon/tunnel state into aggregate readiness.
+### Lifecycle health
 
-Do not run the full browser smoke repeatedly as a health check; that would make observation behavioral and create avoidable self-interference.
+Daemon `/healthz` and supervisor `proxyHealth` remain process/runtime identity evidence. They must not depend on BrowserHost state because the lifecycle code uses them to distinguish external ownership, stale ownership and process identity. A BrowserHost failure must not make a live external daemon look unowned.
+
+### Provider admission
+
+Add a distinct supervisor-owned `turns_enabled` gate, default false, controlled only through authenticated `/admin/enable|disable` on the existing control-token path.
+
+- `/v1/responses` and `/v1/responses/compact` require `!draining && turns_enabled`;
+- `/v1/models` remains available while turn admission is disabled;
+- existing `accepting_turns` remains drain/resume state and is not overloaded.
+
+This allows the daemon/broker to exist for startup diagnostics while preventing any browser-backed model turn before the supervisor has completed the BrowserHost proof and required tunnel startup.
+
+### Application READY
+
+Electron/`RuntimeSupervisor` owns aggregate READY. The daemon does not poll Electron for BrowserHost health.
+
+A launcher startup/recovery epoch may enable turns only after:
+
+1. daemon identity/broker exists;
+2. qualified BrowserHost startup proof passes;
+3. required tunnel is ready.
+
+Each actual browser turn retains point-of-use BrowserHost validation, avoiding stale daemon-cached browser readiness.
 
 ## Principal risks
 
@@ -101,23 +123,30 @@ Goose remains the durable conversation source of truth. Browser surfaces and Tem
 
 ### Exact-once state loss across daemon restart
 
-Daemon-local execution/retry/session state can be lost while an Electron BrowserHost tab survives. Automatic daemon restart can therefore allow a same-execution retry to reuse already-submitted browser state without the old daemon's circuit/lineage memory.
+Daemon-local execution/retry/session state can be lost while Electron BrowserHost state survives. Initial launcher qualification must therefore not automatically restore turn admission after daemon restart.
 
-Initial launcher-owned Phase 1 must not automatically restart the daemon. A daemon failure degrades the application and requires the application restart boundary until deterministic proof closes this state-transfer problem.
+If daemon recovery is later enabled, it starts with `turns_enabled=false`, reruns the qualified BrowserHost proof and required tunnel readiness, then enables. Do not allow a restarted daemon to silently resume browser turns from process health alone.
 
 ### Non-idempotent tool loss across tunnel restart
 
-A Goose Native command may have performed a side effect before its MCP/tunnel response is lost. Therefore automatic tunnel restart must never occur underneath active HTTP/browser/tool work. Do not retry non-idempotent broker invocations merely because transport was replaced.
+A Goose Native command may have performed a side effect before its MCP/tunnel response is lost. Therefore tunnel recovery must never occur underneath active HTTP/browser/tool work.
+
+Any later tunnel recovery sequence is disable admission → bounded drain/idle proof → owned tunnel restart → tunnel ready → enable admission. Do not retry non-idempotent broker invocations merely because transport was replaced.
 
 ### Lifecycle self-interference
 
 A turn must not be used to stop/restart the exact runtime carrying that turn. Lifecycle/autostart/cutover qualification must run from an external/operator-safe boundary.
 
-### Quit/orphan safety
+### Quit/orphan safety and cancel-before-retire
 
-In launcher ownership, quit must terminate positively owned detached children within a bounded hard deadline even when graceful drain cannot complete. Do not leave the application half-alive after cancelling quit, and do not allow repeated signals to bypass cleanup and orphan children.
+Ordinary UI Quit and forced OS/process termination are intentionally different.
 
-In external ownership, quit must not touch externally owned daemon/tunnel processes at all.
+- UI Quit with active work refuses cleanly and may offer explicit Cancel-and-Quit through the existing cancellation path.
+- OS logout/reboot/SIGTERM cannot refuse indefinitely: disable admission, bounded drain, then cancel outstanding browser turns on expiry before graceful shutdown/hard owned-process cleanup.
+
+The cancellation step preserves the existing cancel-before-retire safety argument as far as possible. It cannot prove that a non-idempotent external side effect did not already land, so do not create a second durable provider conversation store to fake certainty.
+
+In external ownership, application quit must not touch externally owned daemon/tunnel processes at all.
 
 ### Autostart double ownership
 
@@ -129,7 +158,7 @@ The existing `0b89d5e` provider path remains available while launcher ownership 
 
 Cutover and rollback are explicit ownership-transfer operations. The launcher must never make rollback unavailable merely by being opened or closed while `runtimeOwner=external`.
 
-Delete obsolete independent-supervision machinery only after integrated startup/readiness, ordinary/tool turns, continuation, terminating quit/reopen and packaged single-authority reboot proof.
+Delete obsolete independent-supervision machinery only after integrated startup/admission/readiness, ordinary/tool turns, continuation, quit/reopen and packaged single-authority reboot proof.
 
 ## Phase 2 security note
 
@@ -146,6 +175,7 @@ Goose Native `turn_token` authority remains separate from Goose Control/ACP auth
 ## Network exposure
 
 - Responses/health and browser/runtime control listeners remain loopback/private.
+- `/admin/enable|disable` must use the existing authenticated lifecycle control-token boundary; do not expose unauthenticated admission toggles.
 - Full mode uses an outbound Secure MCP Tunnel and requires no public inbound listener.
 - Any internal IPC/network boundary removed by consolidation should be deleted rather than replaced with a broader privileged interface.
 
