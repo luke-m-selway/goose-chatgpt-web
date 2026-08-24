@@ -1,8 +1,8 @@
 # Architecture
 
-Status: **current/proven** for the runtime architecture described here. Goose Control is marked separately as the next **active** milestone.
+Status: **current/proven** for the existing provider path described first; the integrated ChatGPT-Web application is the **active planning/design direction** and is not yet implemented or qualified.
 
-## Runtime shape
+## Current/proven runtime shape
 
 ```text
 Goose
@@ -13,9 +13,9 @@ Responses daemon (independently supervised, loopback)
   ├─ bounded response/turn replay state
   ├─ capability broker in full mode
   └─ browser helper
-          │ BrowserHost control + CDP
+          │ BrowserHost control + Playwright/CDP
           ▼
-  Electron BrowserHost (bootstrap-only)
+  Electron BrowserHost
           │ authenticated task-bound surface
           ▼
   ChatGPT Temporary Chat
@@ -25,105 +25,141 @@ ChatGPT → Goose Native → Secure MCP Tunnel → active Goose tool contract
        ← same browser response ← tool result ← Goose execution/approval
 ```
 
-## Ownership contracts
+Current activated local diagnostic checkpoint: `0b89d5ecb912a2977d0bf60d9c3a8fa53ac5cad6` (`0b89d5e`). It is diagnostic-only on top of qualified behavioral baseline `6d4bea17fb3de3cb770cb3d4f21fd31b49019dc8`.
 
-### Goose
+## Durable Goose boundary — preserve through redesign
 
-Goose is the source of truth for:
+Goose remains authoritative for:
 
-- logical conversation/session state;
+- logical conversation/session state and history;
 - tools and approvals;
 - delegation/subagents;
-- recipes/extensions;
 - project execution;
 - compaction/context lifecycle.
 
-Browser chats are transport state, not durable Goose history.
+ChatGPT browser chats remain disposable transport/cache state. The integrated application must **not** become the durable agent or a second conversation authority.
 
-### Responses daemon
+## Current component ownership
 
-The daemon owns the loopback Responses provider surface, bounded response replay/turn correlation, the full-mode capability broker, and the browser-helper client process. It is supervised independently of Electron.
+Today:
 
-### Electron BrowserHost
+- Responses daemon owns the loopback provider surface, bounded replay/turn correlation, broker and browser-helper process;
+- Electron owns the authenticated ChatGPT partition, task-bound browser surfaces, BrowserHost control and CDP endpoints, and BrowserHost-local cleanup;
+- Secure MCP Tunnel is independently supervised and carries `Goose Native` connector calls back to the active Goose turn.
 
-Electron owns BrowserHost only:
+Those are current implementation facts. The earlier rule that these three components must remain independently top-level-owned is **superseded as an architectural constraint**.
 
-- the authenticated ChatGPT partition;
-- task-bound browser surfaces;
-- BrowserHost control endpoint;
-- CDP endpoint;
-- surface lease/release and BrowserHost-local cleanup.
+## Active north-star design — self-contained ChatGPT-Web provider application
 
-In standalone Goose bootstrap-only mode, Electron must not adopt, restart, drain, or stop the Responses daemon or Secure MCP Tunnel. The inherited `RuntimeSupervisor` still exists in the launcher code for other modes; it is **not** the standalone ownership contract and must not be restored as daemon/tunnel owner.
-
-### Secure MCP Tunnel
-
-The tunnel is independently supervised below the connector/tool path. In full mode it carries `Goose Native` connector calls back to the active Goose turn. Restarting the daemon alone is not equivalent to restarting a tunnel-owned connector child after a public tool-contract change.
-
-## Browser-turn contract
-
-Each logical Goose user turn may use a fresh ChatGPT Temporary Chat. Goose sends the accumulated context it wants the provider to see; physical browser-chat reuse is not required for Goose continuation.
-
-For a tool-capable turn:
-
-1. the daemon creates a bounded browser-turn capability;
-2. ChatGPT requests an action through `Goose Native`;
-3. the bridge returns a normal provider tool call to Goose;
-4. Goose executes/approves the tool;
-5. the matching tool result returns with the same logical provider-turn identity;
-6. the browser helper resumes the same active ChatGPT response;
-7. completion revokes the capability and releases the BrowserHost surface.
-
-Goose continuation has been proven with a persisted named Goose session and a separate later `--resume`. A raw `previous_response_id` request is not a substitute for native Goose continuation metadata.
-
-## BrowserHost readiness
-
-Usable BrowserHost readiness is stronger than a PID, descriptor, or listening CDP socket.
-
-The canonical lifecycle readiness proof:
-
-1. waits for authenticated BrowserHost session readiness;
-2. leases exactly one disposable lifecycle surface through the BrowserHost control path;
-3. reads the descriptor-provided helper executable/script;
-4. runs that helper with Node/Electron Node semantics and `ELECTRON_RUN_AS_NODE=1`;
-5. verifies the exact leased surface;
-6. releases the disposable lease in `finally`;
-7. verifies BrowserHost is idle/usable again.
-
-Bun-direct Playwright/CDP is not authoritative readiness evidence because that path has produced false hangs/timeouts against an otherwise healthy BrowserHost.
-
-## Canonical lifecycle and autostart
+Target boundary to design and review:
 
 ```text
-start: tunnel ready → BrowserHost genuinely ready → Responses daemon ready
-stop:  Responses daemon → BrowserHost → tunnel
+┌─────────────────────┐
+│        Goose        │
+│                     │
+│ sessions/history    │
+│ context/compaction  │
+│ tools/approvals     │
+│ orchestration       │
+│ delegation          │
+└──────────┬──────────┘
+           │ stable provider contract
+           │ preferably Responses-compatible HTTP/SSE
+           ▼
+┌──────────────────────────────────────┐
+│     ChatGPT-Web Application          │
+│         Electron today               │
+│                                      │
+│ one top-level owner/supervisor of:   │
+│ - Responses/provider endpoint        │
+│ - authenticated ChatGPT browser      │
+│ - browser surfaces/automation        │
+│ - provider execution state           │
+│ - ChatGPT-specific retry/recovery    │
+│ - Goose Native bridge                │
+│ - MCP server / secure tunnel         │
+│ - helper children if still useful    │
+│ - health/readiness                   │
+│ - startup/shutdown/reconstruction    │
+└──────────────────────────────────────┘
 ```
 
-Ordered macOS autostart uses one login-visible project coordinator LaunchAgent. The coordinator invokes canonical `lifecycle start` and has `KeepAlive=false`; daemon/tunnel launchd definitions are managed under the Goose runtime home and are loaded/supervised by launchd after canonical startup.
+Process separation is still allowed where useful. The simplification is **ownership/lifecycle encapsulation**, not forced single-process monolithism.
 
-The coordinator design prevents three independent login startup paths from racing and preserves the canonical dependency order.
+The stable Goose-facing boundary, not Electron itself, provides replaceability. If Electron later proves unsuitable, replace the whole ChatGPT-Web provider application behind that contract.
 
-Actual Mac reboot/login reconstruction is **NOT RUN**. See [`runtime-lifecycle.md`](runtime-lifecycle.md) for the proof register.
+## Provider protocol vs ACP vs MCP
 
-## Self-interference boundary
+ChatGPT-Web is primarily a Goose **model provider**. Do not adopt ACP as the primary Goose↔ChatGPT-Web boundary merely because ACP is an agent protocol.
 
-An active BrowserHost-backed agent turn must not be used as proof that stopping/restarting the same BrowserHost stack is safe. An earlier failed in-task autostart/lifecycle proof was narrowed to that self-interference and is not a general Electron regression.
+The existing Responses-compatible HTTP/SSE provider surface is the default candidate to preserve in Phase 1 unless scouting shows a materially better native Goose provider contract.
 
-## Goose Control — active next milestone
-
-Goose Control is above Goose's persisted session boundary, not below it:
+MCP/Goose Native remains appropriate for the reverse tool path:
 
 ```text
-ChatGPT Planner
-  → private custom GPT
-  → GPT Action
-  → authenticated HTTPS REST/OpenAPI Goose Control facade
-  → authenticated loopback goose serve ACP
-  → persisted Goose session
+ChatGPT Web
+  → Goose Native
+      → application-owned MCP/tunnel machinery
+          → active Goose tool contract
 ```
 
-Goose Control must not depend on Electron windows, CDP targets, ChatGPT browser-session identity, or BrowserHost process identity. It is also separate from Goose Native's per-turn `turn_token` capability.
+The redesign should internalize ownership of that machinery without changing Goose's tool/approval authority.
 
-ACP is the settled Goose-side control backend. A later Orchestrator/Palmate layer may become a workflow target behind Goose Control, but it is not the Goose Control transport.
+## Browser-control boundary under review
 
-See [`goose-control-plan.md`](goose-control-plan.md).
+Current production-critical browser path uses external Playwright attached over CDP to Electron-owned surfaces.
+
+Recent diagnostics, especially trace `df0fa0069ad9`, justify re-examining that boundary: Electron main-loop/control and renderer activity could remain healthy while shared Playwright/CDP operations stalled for tens of seconds. This does **not** prove that CDP itself is universally causal.
+
+Phase 1 should preserve as much existing browser behavior as practical while consolidating lifecycle ownership.
+
+A later Phase 2 may migrate browser-control stages incrementally to Electron-owned facilities where evidence supports simplification, including `webContents`, native navigation/load events, trusted input, narrowly scoped `executeJavaScript`, `session.webRequest`, preload/contextBridge, or `webContents.debugger` as an intermediate path. Do not replace Playwright auto-waiting with brittle home-grown polling merely for architectural purity.
+
+Security requirements remain:
+
+- `contextIsolation` retained;
+- no generic Node/IPC capability exposed to remote ChatGPT content;
+- narrow purpose-built preload/IPC only where justified;
+- loopback/private runtime surfaces retained;
+- browser/UI drift fails closed.
+
+## Reliability invariants to transplant, not discard
+
+Any ownership or browser-control redesign must preserve the qualified guarantees already established for:
+
+- CGW-009 exact-once submission;
+- semantic Markdown reconciliation (Gate 2A);
+- exact thread-error classification (Gate 2B);
+- CGW-017 progress-vs-liveness handling;
+- CGW-007 retry-claim responsiveness;
+- residual transport-terminal execution retirement;
+- execution identity, tool continuation and browser-surface cleanup contracts.
+
+Prefer transplanting these invariants into simpler ownership rather than carrying every old mechanism forward unchanged.
+
+## Parallel migration / rollback architecture
+
+The integrated application must be developed alongside the existing provider path rather than by destroying it first.
+
+```text
+existing `0b89d5e` path  ── retained baseline / rollback
+
+integrated app path       ── built and qualified independently
+```
+
+Only after integrated startup/readiness, read-only turn, tool-capable turn, continuation, quit/reopen reconstruction and cutover gates pass should it become normal. Retain the previous path briefly as rollback, then delete independent-supervision machinery deliberately.
+
+The design and Opus review should reject any approach that requires ChatGPT-Web to be unavailable throughout the rebuild.
+
+## Resource policy
+
+Primary objective:
+
+```text
+one application
+one owner
+one restart boundary
+one readiness contract
+```
+
+Secondary objective: minimize idle resources only where that remains simple inside the single owner. Demand-start is an optimization, not a reason to recreate independent top-level infrastructure.
