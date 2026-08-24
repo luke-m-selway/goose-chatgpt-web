@@ -1,25 +1,27 @@
 # Runtime lifecycle and macOS autostart
 
-Status: **current/proven** through manual/canonical lifecycle, live ordered-autostart triggering, ordinary Goose first turn, and separate dependent continuation. **Actual reboot/login reconstruction is NOT RUN.**
+Status: **current/proven** for the existing manually reconstructed runtime; the actual reboot/login autostart proof has now been **RUN and FAILED / NOT QUALIFIED**. The integrated single-application lifecycle below is **planning/design direction only** until implemented and qualified.
 
-Known-good Electron checkpoint: `c624274` (`Checkpoint proven Electron lifecycle and Goose inference`).
-Current-main autostart checkpoint: `dd44b74` (`Add ordered macOS autostart coordinator`).
+Current activated local diagnostic checkpoint: `0b89d5ecb912a2977d0bf60d9c3a8fa53ac5cad6` (`0b89d5e`).
+Qualified behavioral baseline beneath it: `6d4bea17fb3de3cb770cb3d4f21fd31b49019dc8` (`6d4bea1`).
 
-## Ownership
+The PR #35 documentation branch does not contain that local implementation lineage and must not be used to overwrite or reconcile `fix/electron-native-liveness`.
 
-The standalone Goose runtime has three separately owned infrastructure layers:
+## Current/proven ownership
+
+The currently deployed standalone Goose runtime still has three separately owned infrastructure layers:
 
 1. **Secure MCP Tunnel** — independently supervised outbound connector/tool runtime.
-2. **Electron BrowserHost** — bootstrap-only browser owner.
+2. **Electron BrowserHost** — authenticated browser/surface owner.
 3. **Responses daemon** — independently supervised loopback Responses provider and browser-helper owner.
 
-Goose is outside that infrastructure ownership tree and remains the owner of logical conversation/session state, tools/approvals, delegation, recipes/extensions, project execution, and context lifecycle.
+Goose remains outside that infrastructure ownership tree and owns durable logical session/history, tools/approvals, delegation, project execution and context/compaction lifecycle. ChatGPT browser chats remain disposable transport/cache state.
 
-Electron owns BrowserHost only. Do not restore daemon/tunnel ownership to Electron `RuntimeSupervisor`.
+This description is current implementation truth, **not a permanent architecture mandate**. The earlier instruction that Electron must never own daemon/tunnel supervision is superseded as a design constraint.
 
-## Canonical lifecycle
+## Current canonical lifecycle
 
-Startup:
+Existing startup:
 
 ```text
 Secure MCP Tunnel ready
@@ -27,7 +29,7 @@ Secure MCP Tunnel ready
     → Responses daemon ready
 ```
 
-Shutdown:
+Existing shutdown:
 
 ```text
 Responses daemon
@@ -35,94 +37,95 @@ Responses daemon
     → Secure MCP Tunnel
 ```
 
-The operator-facing path is:
+The existing operator path remains:
 
 ```bash
 codex-chatgpt-web lifecycle <status|start|restart|stop>
 ```
 
-Use that coordinator rather than manually composing tunnel/service/launcher steps for ordinary operation.
+until an integrated replacement is implemented and qualified.
 
-## BrowserHost readiness contract
+## Existing BrowserHost readiness contract
 
-`lifecycle start` treats BrowserHost as ready only after the existing descriptor-provided helper path succeeds:
+For the current stack, usable BrowserHost readiness remains stronger than PID/descriptor/CDP existence. The canonical existing path leases a disposable surface, verifies it through the descriptor-provided Node/Electron Node helper with `ELECTRON_RUN_AS_NODE=1`, releases the lease in `finally`, and confirms BrowserHost usability again.
 
-1. BrowserHost authenticated/session-ready inspection succeeds.
-2. One disposable `lifecycle_*` surface is leased through the BrowserHost control path.
-3. The descriptor's helper executable/script is launched with `ELECTRON_RUN_AS_NODE=1`.
-4. The helper verifies the exact leased surface.
-5. The lease is released in `finally`, including failure paths.
-6. A read-only BrowserHost probe confirms the host is usable again.
+Do not weaken this current proof merely because the future ownership model may change. Equivalent or stronger readiness evidence is required before cutover.
 
-Do not replace this evidence with Bun-direct Playwright `connectOverCDP()` or another Bun-direct CDP probe. That route has hung/timed out while the same BrowserHost remained healthy through the Node/Electron Node helper path.
+## Actual reboot/login proof — RUN, FAIL / NOT QUALIFIED
 
-## Ordered macOS autostart
+A full macOS reboot/login was performed on 2026-08-24.
 
-The current autostart entry point is:
+Observed result:
 
-```bash
-codex-chatgpt-web autostart <status|install|trigger|disable>
-```
+- automatic ChatGPT-Web infrastructure reconstruction did **not** occur;
+- manual canonical bring-up was required;
+- manual post-reboot bring-up succeeded and restored healthy daemon/tunnel/BrowserHost with stable idle `0/0` active turn counts;
+- exact active checkpoint was `0b89d5e`;
+- independent pre-turn raw DevTools baseline was healthy (`/json/version` total ~17.3 ms; raw WS connect ~46.2 ms; `Browser.getVersion` ~4.86 ms; total ~51.1 ms);
+- the first post-reboot manual ChatGPT-Web High run showed dramatically healthier startup/control behavior and completed substantial real Goose Native work, but later surfaced `chatgpt_retry_circuit_open` after an unresolved causal failure.
 
-The installed ownership model is:
+Therefore the old status **`actual reboot/login reconstruction is NOT RUN` is false**. Do not replace it with PASS. The correct lifecycle verdict is **RUN — automatic reconstruction FAILED / NOT QUALIFIED; manual reconstruction PASSED**.
+
+The reboot materially improved one severe startup/control episode but did not prove ChatGPT-Web fixed; multiple failure classes remain plausible.
+
+## Governing lifecycle redesign direction — not yet implemented
+
+The architectural priority is now:
 
 ```text
-~/Library/LaunchAgents/
-  one project coordinator LaunchAgent
-      RunAtLoad=true
-      KeepAlive=false
-      → canonical lifecycle start
-
-Goose runtime home/launchd/
-  daemon launchd definition   (KeepAlive=true)
-  tunnel launchd definition   (KeepAlive=true, full mode)
+one ChatGPT-Web application
+one top-level owner
+one restart boundary
+one readiness contract
 ```
 
-Only the coordinator is login-visible. The daemon/tunnel definitions are moved to the runtime-managed launchd directory and are explicitly bootstrapped by the canonical lifecycle in dependency order. This preserves launchd supervision without allowing daemon/tunnel `RunAtLoad` behavior to race BrowserHost construction at login.
+The intended normal UX is:
 
-Bootstrap-only Electron disables its inherited launcher autostart behavior; the canonical lifecycle is the startup authority.
+```text
+open Goose
+open ChatGPT-Web application
+  → ChatGPT-Web internally starts/supervises what it needs
+  → provider appliance reaches READY
+```
 
-## Proof register
+The ChatGPT-Web application may still use separate child processes internally where useful, including the Responses endpoint, browser worker/helper, MCP server and secure tunnel. The requirement is one clear **top-level application owner**, not one OS process.
 
-### PASS
+The stable replaceability boundary moves upward: Electron is today's implementation of the ChatGPT-Web provider application; if Electron later proves unsuitable, replace the application behind the same Goose-facing provider contract rather than keeping every internal component independently operator-owned.
 
-- one login-visible project coordinator LaunchAgent;
-- daemon/tunnel launchd definitions managed under the Goose runtime home;
-- coordinator invokes canonical `lifecycle start`;
-- coordinator `KeepAlive=false`;
-- launchd daemon/tunnel ownership loaded correctly;
-- canonical lifecycle reports daemon/tunnel/BrowserHost healthy;
-- after the earlier live-task self-interference was diagnosed, a fresh ordinary Goose first turn passed;
-- a separate dependent `--resume` also passed.
+Resource minimisation/demand-start is secondary. Lazy startup of Chromium or expensive children is welcome only when it remains simple inside the single-owner lifecycle. It must not reintroduce cross-owner coordination, special recovery paths, or weaken `open ChatGPT-Web → provider appliance READY`.
 
-### NOT RUN
+## Parallel, rollback-capable migration constraint
 
-- actual Mac reboot/login → automatic reconstruction → ordinary Goose first turn → separate dependent `--resume`.
+Do **not** tear down the existing `0b89d5e` provider path in place while building the integrated mode.
 
-Do not describe reboot/login recovery as proven before that exact sequence is run.
+Required migration posture:
 
-## Continuation proof boundary
+```text
+existing provider path        remains available
+         │
+         ├── current known-good/diagnostic baseline
+         │
+new integrated app path       developed alongside it
+```
 
-The authoritative ordinary-Goose continuation proof is:
+Qualification order for the integrated path:
 
-1. run a persisted named Goose session;
-2. end that invocation;
-3. later perform a separate `--resume` of that persisted session;
-4. verify dependent continuation through ordinary Goose/native metadata.
+1. app starts all required internal infrastructure;
+2. health/readiness passes;
+3. ordinary read-only ChatGPT-Web turn passes;
+4. Goose Native/tool-capable turn passes;
+5. continuation/multi-turn passes;
+6. quit/reopen reconstruction passes;
+7. only then make integrated mode the normal path;
+8. retain the old path briefly as rollback;
+9. delete independent-supervision machinery only after the replacement is proven.
 
-Do not substitute stdin-interactive continuation or a hand-authored raw Responses request carrying only `previous_response_id`.
+Development may be substantial, but ChatGPT-Web must not require prolonged unavailability. Downtime should be limited to bounded qualification/cutover windows.
 
-Fresh ChatGPT Temporary Chats across Goose user turns are expected because Goose, not browser-chat persistence, is the durable conversation authority.
+## Self-interference and non-regression rules
 
-## Self-interference boundary
-
-Do not test stop/restart/autostart lifecycle behavior from an active BrowserHost-backed turn that depends on the exact runtime being manipulated. A prior failed in-task proof was narrowed to this self-interference. It must not be recorded as a general Electron or autostart regression.
-
-## Current non-regression rules
-
-- Keep daemon and tunnel supervision independent from Electron.
-- Keep the canonical start/stop order above.
-- Keep BrowserHost readiness on the descriptor-provided Node/Electron Node helper path.
-- Release disposable lifecycle leases in `finally`.
-- Preserve the original causal error rather than replacing it with later retry/cleanup symptoms.
-- Do not repeat expensive runtime proofs merely because old historical docs mention them; re-run only the proof relevant to a changed contract.
+- Never qualify stop/restart behavior from a turn that depends on the exact runtime being stopped.
+- Preserve original causal failures rather than replacing them with later retry/cleanup symptoms.
+- Preserve exact-once send, semantic reconciliation, typed error classification, progress/liveness, retry-claim and terminal-retirement guarantees through ownership changes.
+- Timeouts remain safety nets, not normal lifecycle control flow.
+- Do not delete the current rollback path until the integrated path has passed the explicit gates above.
