@@ -2,7 +2,7 @@
 
 ## Purpose and authority
 
-This document and PR #35 are the current **implementation-order / architecture-planning authority** for `goose-chatgpt-web` after local Ox scouting and fresh Opus adversarial review.
+This document and PR #35 are the current **implementation-order / architecture-planning authority** for `goose-chatgpt-web` after local Ox scouting, fresh Opus adversarial review, and one narrow Opus clarification pass on readiness/startup/quit semantics.
 
 PR #31 remains the chronological incident/evidence ledger. PR #32 / CGW-010 remains a separate large-context workstream.
 
@@ -78,15 +78,7 @@ MCP/Goose Native remains the reverse tool path; its transport can become an inte
 
 ## Scouting conclusion — reuse, do not rebuild
 
-Local source scouting established that the Electron `RuntimeSupervisor` already provides most of the needed lifecycle machinery:
-
-- daemon/tunnel process start;
-- readiness waits;
-- drain/resume compensation;
-- bounded restart machinery;
-- process-tree shutdown;
-- persisted launcher ownership state;
-- external/stale-runtime interlocks.
+Local source scouting established that the Electron `RuntimeSupervisor` already provides most needed lifecycle machinery: daemon/tunnel start, readiness waits, drain/resume compensation, bounded restart machinery, process-tree shutdown, persisted launcher ownership state, and external/stale-runtime interlocks.
 
 Standalone Goose currently constructs this supervisor but bypasses its ownership path through bootstrap-only mode, then recreates top-level orchestration in `src/lifecycle.ts` plus launchd-backed `service.ts`, `tunnel-service.ts`, and `autostart.ts`.
 
@@ -94,18 +86,18 @@ Therefore the reviewed verdict is **PARTIAL REUSE**: adapt the existing supervis
 
 Current upstream `miuuyy/codex-chatgpt-web` v3.0.2 independently supports this direction: launcher-owned supervision behind a Responses-compatible provider boundary. Use upstream as design/reference evidence, not as a blind rebase target.
 
-## Fresh Opus review — verdict and accepted corrections
+## Opus review + clarification — accepted corrections
 
-Fresh Opus verdict: **REVISE**, not reject.
+Fresh Opus verdict: **REVISE**, not reject. The follow-up clarification then corrected one of Opus's own initial recommendations.
 
-The core reuse architecture is accepted, but the initial candidate had four load-bearing defects:
+Accepted conclusions:
 
-1. external ownership could still be mutated on application quit/tunnel adoption;
-2. provider readiness would decay to daemon-process health after startup;
-3. tunnel-before-daemon publishes a connector before its broker exists;
-4. automatic daemon/tunnel recovery is unsafe around surviving browser state and non-idempotent tool calls.
-
-The design below incorporates those corrections.
+1. external ownership must remain non-mutating on **all** launcher paths, including quit and tunnel adoption;
+2. daemon `/healthz` must **not** depend on BrowserHost state, because `proxyHealth` is lifecycle/ownership identity evidence and folding BrowserHost into it would corrupt external-owner detection and stale-owner recovery;
+3. provider turn admission needs a distinct supervisor-owned `turns_enabled` gate rather than overloading `accepting_turns`;
+4. launcher-owned startup should bind the daemon/broker first with turns disabled, then prove BrowserHost, then start tunnel, then enable turns;
+5. automatic daemon/tunnel recovery is unsafe unless it re-enters those admission/readiness rules and is turn-aware; initial live Phase 1 remains deliberately conservative;
+6. UI Quit and OS/process termination need different semantics so ordinary user quit can refuse active work while forced OS termination still cleans owned children and preserves cancel-before-retire as far as possible.
 
 # Reviewed target architecture
 
@@ -119,9 +111,10 @@ ChatGPT-Web Application (Electron today)
   ├─ Responses daemon
   │    ├─ provider execution/replay state
   │    ├─ Goose Native turn broker
-  │    └─ browser helper client
+  │    ├─ process/runtime /healthz identity
+  │    └─ supervisor-owned turns_enabled admission gate
   ├─ Secure MCP tunnel / MCP child (full mode)
-  ├─ aggregate health/readiness
+  ├─ supervisor-owned aggregate READY state
   └─ one startup/shutdown/restart boundary
 ```
 
@@ -141,7 +134,7 @@ Validate it in the shared config path and Electron `RuntimeSupervisor` config va
 
 This is the existing standalone/rollback path.
 
-The Electron supervisor must be non-mutating across **all** relevant entry points:
+The Electron supervisor must be non-mutating across all relevant entry points:
 
 - `startIfConfigured` / startup;
 - stop/restart/setup shutdown;
@@ -150,27 +143,60 @@ The Electron supervisor must be non-mutating across **all** relevant entry point
 - configured-tunnel adoption for stop;
 - recovery paths.
 
-It may observe/report state, but must perform zero daemon/tunnel control operations.
+It may observe/report state, but performs zero daemon/tunnel control operations.
 
 A matching port, config, alias/profile, missing launcher state, dead external daemon or healthy external tunnel does **not** transfer ownership.
 
-Opening and closing the integrated-capable Electron app while external mode is active must leave the rollback stack byte-for-byte operational.
+Opening and closing the integrated-capable Electron app while external mode is active must leave the rollback stack operational.
 
 ## `runtimeOwner=launcher`
 
 Launcher mutation is permitted only after explicit operator-controlled transfer from external mode with the external stack verified stopped.
 
-The launcher owns only children positively attributable to this ownership mode. Initial launcher mode should avoid opportunistic tunnel adoption entirely; start from a clean ownership boundary.
+The launcher owns only children positively attributable to this ownership mode. Initial launcher mode avoids opportunistic tunnel adoption entirely; start from a clean ownership boundary.
 
-Mixed ownership is an invalid state and must fail closed rather than be reconciled automatically.
+Mixed ownership is invalid and must fail closed rather than be reconciled automatically.
 
-# Readiness contract
+# Readiness and admission contract
 
-The initial candidate incorrectly placed BrowserHost readiness only in startup ordering. That would allow readiness to decay to daemon process liveness.
+## Keep daemon health lifecycle-pure
 
-Two distinct BrowserHost predicates are required:
+Daemon `/healthz` remains process/runtime identity health. It must **not** poll or depend on BrowserHost readiness.
 
-## Startup proof
+Reason: `proxyHealth` is used for external-owner detection, stale-owner identity and stop-path liveness. If BrowserHost failure made `proxyHealth` false, a live external daemon could stop looking externally owned and launcher recovery could target the wrong component.
+
+Therefore:
+
+- `/healthz` stays lifecycle/identity-oriented;
+- `accepting_turns` keeps its existing meaning `!draining` and is not overloaded;
+- BrowserHost readiness remains owned by Electron/`RuntimeSupervisor` aggregate state;
+- every real browser turn still gets point-of-use descriptor/process validation through the existing BrowserHost client path.
+
+## Distinct provider admission gate
+
+Add:
+
+```text
+turns_enabled: boolean
+```
+
+with authenticated existing-control-token operations:
+
+```text
+POST /admin/enable
+POST /admin/disable
+```
+
+Contract:
+
+- default `turns_enabled=false` at daemon birth;
+- supervisor is the only lifecycle writer;
+- `/v1/responses` and `/v1/responses/compact` require `!draining && turns_enabled`;
+- when disabled they return a legible 503 rather than accepting a turn;
+- `/v1/models` remains available while turns are disabled because its catalog path has no BrowserHost dependency;
+- `accepting_turns` remains the drain/resume signal and existing drain compensation semantics stay intact.
+
+## Startup BrowserHost proof
 
 Reuse/share the existing qualified proof from `src/lifecycle.ts`:
 
@@ -183,85 +209,115 @@ Reuse/share the existing qualified proof from `src/lifecycle.ts`:
 
 Move this into one shared module rather than cloning it.
 
-## Continuous health predicate
+## Aggregate READY
 
-Do **not** run the full leased-surface proof repeatedly.
+Electron/`RuntimeSupervisor` is the one owner of application READY.
 
-Add a bounded, non-destructive BrowserHost-ready probe to provider/application health. The daemon `/healthz`/supervisor health path must no longer equate daemon process health with provider readiness.
-
-Target aggregate state:
+READY is reached only after:
 
 ```text
-READY = browser_host_ready
-     ∧ daemon_healthy_and_accepting
-     ∧ tunnel_ready_if_full_mode
+daemon identity healthy
+∧ turns_enabled
+∧ qualified BrowserHost proof completed for this launcher start/recovery epoch
+∧ tunnel ready if full mode
 ```
 
-BrowserHost death/stale descriptor/unusable control state must make the provider degraded/unready even if the daemon PID and HTTP listener survive.
+Do not make daemon health poll Electron. Point-of-use browser validation remains authoritative for each actual turn.
 
-# Dependency order
+# Exact launcher-owned startup sequence
 
 The current standalone order remains unchanged until cutover.
 
-For **launcher-owned** startup, reverse the daemon/tunnel dependency because the Goose Native broker socket is created by the daemon.
-
-Target launcher order:
+For **launcher-owned** startup:
 
 ```text
-BrowserHost exists
-  → shared qualified BrowserHost startup proof
-    → Responses daemon ready / broker socket exists
-      → Secure MCP Tunnel ready
-        → aggregate READY
+0. Ownership gate
+   runtimeOwner == launcher
+   ∧ standalone != true
+   ∧ existing proxyHealth/ownership-state external detection passes
+   → otherwise fail closed before starting anything.
+
+1. Spawn Responses daemon.
+   waitForProxy(requireAccepting=false).
+   Port bound; identity confirmed; broker socket exists.
+   turns_enabled=false.
+
+2. Run shared qualified BrowserHost startup proof.
+
+3. Start Secure MCP Tunnel in full mode.
+   Broker socket already exists before connector publication.
+
+4. POST /admin/enable.
+   turns_enabled=true.
+
+5. writeState("ready") and publish aggregate READY.
 ```
 
-This removes the window in which ChatGPT can reach a live connector before the broker exists.
+Failure at steps 2–4 runs failed-start cleanup against a daemon that has admitted no provider turn, so drain/cleanup is deterministic.
 
-# Recovery contract — deliberately minimal Phase 1
+# Recovery contract — deliberately conservative
 
-The pre-existing `RuntimeSupervisor` contains bounded child restart machinery, but **do not enable it as normal Phase-1 behavior**.
+The pre-existing `RuntimeSupervisor` contains bounded child restart machinery, but do not enable broad automatic recovery as normal Phase-1 behavior.
 
 ## Daemon
 
-Automatic daemon restart is unsafe while BrowserHost tabs survive because daemon-local retry/execution/session state disappears while the browser can reuse the same trace/tab. This can weaken the exact-once submission boundary on a same-execution retry.
+A daemon restart can erase daemon-local retry/execution/session state while BrowserHost state survives. Initial live Phase 1 therefore treats daemon failure as application degradation and uses application restart as the normal recovery boundary.
 
-Initial launcher behavior on daemon failure:
-
-- mark application degraded/unready;
-- stop accepting normal provider work;
-- require application restart from an external/operator-safe boundary.
-
-No automatic daemon child restart until the surviving-tab/execution-state contract is redesigned and deterministically proven.
+If daemon recovery is later enabled, it must re-enter at startup step 1 with `turns_enabled=false`, re-run the BrowserHost startup proof, and cannot enable turns until the complete readiness sequence passes again.
 
 ## Tunnel
 
 Never restart the tunnel underneath active HTTP/browser/tool work. A non-idempotent Goose Native command may have performed a side effect before the MCP/tunnel response is lost.
 
-Initial launcher behavior:
+If tunnel recovery is later enabled, it must:
 
-- no automatic tunnel restart under load;
-- preferably no automatic tunnel restart at all in the first live slice;
-- later idle-only recovery may be considered after explicit idempotency/ownership proof.
+1. disable new turns;
+2. drain existing provider/browser work within the bounded existing drain contract;
+3. restart the owned tunnel only after idle proof;
+4. re-enable turns only after tunnel readiness.
 
-The application itself is the Phase-1 restart boundary.
+Initial launcher qualification may keep tunnel auto-recovery disabled entirely.
 
 # Quit/shutdown contract
+
+Quit semantics are deliberately asymmetric.
 
 ## External ownership
 
 Electron quit must not call mutating supervisor shutdown against external daemon/tunnel ownership. Persist/release BrowserHost state as appropriate and exit while leaving the standalone stack untouched.
 
-## Launcher ownership
+## Launcher ownership — ordinary UI Quit
 
-Quit must terminate rather than cancel indefinitely:
+If no active work exists, perform normal clean launcher shutdown.
 
-1. stop accepting new work;
-2. make a bounded graceful drain attempt;
-3. after the deadline, terminate only positively owned daemon/tunnel process trees;
-4. persist/destroy BrowserHost and remove stale descriptor state;
-5. exit within a stated hard deadline.
+If active HTTP/browser/tool work exists:
 
-Do not restore `quitting=false` and remain alive because an ordinary Goose turn exceeded a drain timeout. Signal handling must remain cleanup-capable on repeated termination signals so detached children are not orphaned.
+- refuse UI Quit cleanly;
+- keep application/runtime alive;
+- identify the active work;
+- provide an explicit **Cancel-and-Quit** action using the existing cancel path rather than force-killing by default.
+
+Cancel-and-Quit reuses the existing browser-turn cancellation/admin path and then performs normal owned shutdown.
+
+## Launcher ownership — OS logout/reboot/SIGTERM
+
+OS/process termination must never refuse indefinitely.
+
+Required sequence:
+
+```text
+disable new turns
+→ bounded drain
+→ on expiry: /admin/cancel-browser-turns
+→ graceful /admin/shutdown
+→ hard-deadline terminateOwnedProcessTree for positively owned children
+→ persist/destroy BrowserHost + descriptor cleanup
+→ exit
+```
+
+The cancel step matters because current transport-terminal safety relies on cancelling browser work before retiring/clearing same-execution state. Forced termination cannot guarantee whether a non-idempotent side effect already landed, so do not invent durable provider turn state; instead preserve cancel-before-retire where possible and make the forced-termination boundary legible in diagnostics.
+
+Signal handling must remain cleanup-capable on repeated termination signals so detached children are not orphaned.
 
 # Autostart contract
 
@@ -325,12 +381,16 @@ Integrated start must refuse if ownership preconditions are ambiguous.
 | Tunnel owner | launchd `KeepAlive` | launcher child only in launcher mode |
 | BrowserHost owner | Electron | Electron unchanged |
 | Startup orchestration | `src/lifecycle.ts` external coordinator | Electron application in launcher mode |
-| Launcher child order | dormant supervisor tunnel→daemon | BrowserHost proof → daemon → tunnel |
+| Launcher child order | dormant supervisor tunnel→daemon | daemon disabled → BrowserHost proof → tunnel → enable |
 | BrowserHost startup proof | lifecycle-only | shared by both ownership modes |
-| Ongoing provider health | daemon-centric | includes bounded BrowserHost readiness + daemon + tunnel |
-| Daemon auto recovery | launchd / dormant supervisor restart | disabled in initial launcher phase |
-| Tunnel auto recovery | launchd / dormant monitor/restart | disabled initially or at minimum prohibited under active work |
-| Quit | external lifecycle / bootstrap-only BrowserHost release | ownership-aware; external non-mutating, launcher terminating owned children |
+| Daemon `/healthz` | process/runtime identity | unchanged; remains ownership-safe |
+| Turn admission | drain only | distinct `turns_enabled` gate + drain |
+| Application READY | fragmented/implicit | supervisor-owned aggregate readiness |
+| `/v1/models` | daemon/catalog availability | remains available while turns disabled |
+| Daemon auto recovery | launchd / dormant supervisor restart | disabled in initial launcher phase; later recovery must rerun proof before enable |
+| Tunnel auto recovery | launchd / dormant monitor/restart | disabled initially; later requires disable→drain→restart→enable |
+| UI Quit | current requestQuit semantics | refuse active work + explicit Cancel-and-Quit |
+| OS termination | can orphan after failed drain/second signal | disable→drain→cancel→shutdown→hard owned cleanup→exit |
 | Autostart | coordinator + managed launchd definitions | frozen initially; eventual single Electron login authority after packaged proof |
 | Goose-facing provider API | Responses HTTP/SSE | unchanged |
 | Browser automation | helper + Playwright/CDP | unchanged in Phase 1 |
@@ -338,41 +398,44 @@ Integrated start must refuse if ownership preconditions are ambiguous.
 
 # Smallest implementation sequence when authorized
 
-## Slice 1 — ownership and readiness foundation
+## Slice 1 — ownership, admission and shared readiness foundation
 
 Behavior-neutral for the existing external path.
 
 1. Add `runtimeOwner` to config/schema and Electron config validation.
 2. Guard every mutating supervisor path so `external` performs zero daemon/tunnel mutations, including quit/shutdown.
-3. Extract/share the qualified BrowserHost startup proof.
-4. Add continuous bounded BrowserHost readiness to daemon/application health and require it in supervisor/provider-ready decisions.
-5. Change launcher-owned dependency to daemon-before-tunnel.
-6. Freeze Electron autostart reconciliation in the development launcher mode.
-7. Disable automatic daemon/tunnel recovery for the initial launcher path.
+3. Add `turns_enabled` plus authenticated `/admin/enable|disable`; default false; gate `/v1/responses` and `/compact`, leave `/v1/models` available.
+4. Extract/share the qualified BrowserHost startup proof.
+5. Implement launcher startup: daemon disabled → BrowserHost proof → tunnel → enable → READY.
+6. Keep `/healthz` lifecycle-pure and keep `accepting_turns` drain-only.
+7. Freeze Electron autostart reconciliation in development launcher mode.
+8. Keep broad automatic daemon/tunnel recovery disabled for initial launcher qualification.
 
-Do not yet delete any external lifecycle code.
+Do not yet delete external lifecycle code.
 
-## Slice 2 — launcher-owned start and terminating quit
+## Slice 2 — launcher quit/termination semantics
 
-1. Add explicit launcher-mode startup using the existing supervisor.
-2. Require aggregate READY.
-3. Implement ownership-aware terminating quit with bounded drain and hard cleanup deadline.
+1. Normal idle launcher quit.
+2. UI Quit with active work refuses cleanly and exposes Cancel-and-Quit through the existing cancellation path.
+3. OS/process termination uses disable → bounded drain → cancel-browser-turns on expiry → graceful shutdown → hard owned-tree cleanup → exit.
 4. Ensure no orphan Responses port, tunnel child or stale BrowserHost descriptor remains after launcher exit.
-5. Add deterministic external-mode zero-mutation tests around start **and quit**.
+5. Add deterministic external-mode zero-mutation tests around start and quit.
 
 ## Slice 3 — bounded manual qualification
 
 From an operator-safe boundary, one ChatGPT-Web agent at a time:
 
-1. **External zero-mutation proof:** external stack live → open integrated-capable app → app refuses launcher ownership → quit → external daemon/tunnel still loaded/healthy.
-2. Explicit external stop → launcher start → aggregate READY.
-3. Ordinary read-only ChatGPT-Web turn.
-4. Goose Native/tool-capable turn; prove exactly one submission and exactly one broker invocation.
-5. Continuation/multi-turn; prove fresh human-turn execution identity and no stale same-execution resubmission.
-6. Quit during idle.
-7. Quit during an active turn; prove bounded termination, no orphan children, no stale descriptor.
-8. Reopen and reach READY.
-9. Roll back to external path and prove it still starts/works.
+1. **External zero-mutation proof:** external stack live → open integrated-capable app → quit → external daemon/tunnel still loaded/healthy.
+2. Explicit external stop → launcher start.
+3. While `turns_enabled=false`, `/v1/models` succeeds and `/v1/responses` returns legible 503.
+4. BrowserHost proof completes → tunnel ready → enable → aggregate READY.
+5. Ordinary read-only ChatGPT-Web turn.
+6. Goose Native/tool-capable turn; prove exactly one submission and exactly one broker invocation.
+7. Continuation/multi-turn; prove fresh human-turn execution identity and no stale same-execution resubmission.
+8. UI Quit during active work refuses without disrupting the turn; Cancel-and-Quit follows the explicit cancel path.
+9. OS-style termination during active work records cancel-browser-turns before exit and leaves no orphan children/descriptor.
+10. Reopen and reach READY.
+11. Roll back to external path and prove it still starts/works.
 
 Do not retry an unclassified failure merely to obtain a pass.
 
@@ -408,16 +471,24 @@ After launcher path is normal and rollback confidence window passes:
 - live external stack remains healthy after opening/quitting integrated-capable Electron.
 - launcher mode refuses ambiguous/mixed ownership.
 
-## Readiness
+## Admission/readiness
 
-- dead/stale BrowserHost causes `browser_host_ready=false` and aggregate provider unready while daemon remains alive.
-- full BrowserHost startup proof remains lease/release-safe.
-- continuous health does not acquire disposable browser surfaces.
+- daemon starts with `turns_enabled=false`.
+- `/v1/responses` and `/compact` return a legible 503 before enable.
+- `/v1/models` remains available while turns are disabled.
+- `accepting_turns` remains drain-only and existing drain/resume compensation tests stay valid.
+- `/healthz` remains independent of BrowserHost state and remains safe for external-owner detection.
+- no `POST /admin/enable` occurs before a fresh qualified BrowserHost proof and required tunnel readiness.
 
 ## Ordering
 
-- broker socket/daemon readiness exists before launcher invokes tunnel connect.
-- no connector is published before the broker can accept claims.
+- broker socket/daemon identity exists before launcher invokes tunnel connect.
+- no provider turn can be admitted before BrowserHost proof and tunnel readiness.
+
+## Recovery
+
+- daemon recovery cannot reach enable without a fresh BrowserHost proof.
+- tunnel recovery, if enabled later, cannot restart underneath active work; it must disable/drain first.
 
 ## Exact-once/tool path
 
@@ -434,7 +505,9 @@ After launcher path is normal and rollback confidence window passes:
 ## Quit
 
 - external quit leaves external stack untouched.
-- launcher quit during active work exits within the stated deadline.
+- UI quit during active work refuses cleanly without child mutation.
+- Cancel-and-Quit uses existing cancel-browser-turns before owned shutdown.
+- OS termination observes cancel-browser-turns before forced exit when drain expires.
 - no daemon/tunnel orphan and no stale BrowserHost descriptor after exit.
 - reopen reaches READY.
 
@@ -473,11 +546,7 @@ Do not replace mature Playwright auto-waiting with brittle polling.
 
 Before enabling any launcher-owned tunnel **adoption or recovery** later, determine whether `tunnel-client runtimes cleanup/stop` sees a runtime started by `tunnel-client run --profile-dir ... --profile ...`.
 
-This is no longer an implementation blocker for Slice 1 because:
-
-- `external` ownership forbids adoption/mutation;
-- initial `launcher` ownership requires a clean explicit cutover and may fresh-start its own tunnel;
-- automatic tunnel recovery is not part of the first live slice.
+This is no longer an implementation blocker for Slice 1 because external ownership forbids adoption/mutation, initial launcher ownership requires a clean explicit cutover and may fresh-start its own tunnel, and automatic tunnel recovery is not part of first live qualification.
 
 # Governing design principles
 
@@ -490,12 +559,13 @@ This is no longer an implementation blocker for Slice 1 because:
 - timeouts are safety nets, not normal control flow;
 - deterministic proof first, ecological evidence second;
 - explicit ownership beats inference;
+- separate lifecycle health from provider admission/readiness;
 - one clear restart boundary beats overlapping recovery systems;
 - delete old machinery only after its replacement is proven.
 
 # Stop boundary
 
-The mandatory planning sequence is complete: docs/evidence reconciliation, current/upstream inspection, local Ox scouting, coherent architecture/diff, fresh Opus adversarial review, and reconciliation are done.
+The mandatory planning sequence is complete: docs/evidence reconciliation, current/upstream inspection, local Ox scouting, coherent architecture/diff, fresh Opus adversarial review, clarification, and reconciliation are done.
 
 **STOP before implementation.**
 
