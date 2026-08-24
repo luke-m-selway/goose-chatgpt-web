@@ -38,7 +38,8 @@ The mandatory pre-implementation planning sequence is complete:
 3. bounded local Ox ownership/browser/invariant scout — complete;
 4. coherent candidate architecture + current→target ownership diff — complete;
 5. fresh Opus adversarial review — complete with verdict **REVISE**;
-6. Opus findings reconciled into the implementation plan — complete.
+6. narrow Opus clarification on readiness/startup/quit — complete;
+7. findings reconciled into the implementation plan — complete.
 
 The project is now at the **STOP-before-implementation** boundary. No implementation is authorized until the user explicitly starts it.
 
@@ -69,28 +70,45 @@ runtimeOwner = external | launcher
 - `launcher`: application owns only positively attributable children after explicit operator cutover.
 - mixed ownership fails closed; no silent adoption of the rollback stack.
 
-### Phase-1 dependency/readiness order
+### Phase-1 health/admission split
+
+Keep daemon lifecycle health separate from provider admission:
+
+- `/healthz` / `proxyHealth` remain process/runtime identity evidence and do not depend on BrowserHost;
+- `accepting_turns` remains drain/resume state;
+- add supervisor-owned `turns_enabled`, default false;
+- authenticated `/admin/enable|disable` controls turn admission;
+- `/v1/responses` and `/compact` require `!draining && turns_enabled`;
+- `/v1/models` stays available while turns are disabled;
+- Electron/`RuntimeSupervisor` owns aggregate READY.
+
+### Phase-1 startup order
 
 ```text
-BrowserHost exists
-  → shared qualified BrowserHost startup proof
-    → Responses daemon ready / Goose Native broker exists
+ownership gate
+  → daemon starts with turns_enabled=false / broker exists
+    → shared qualified BrowserHost startup proof
       → Secure MCP Tunnel ready
-        → aggregate application READY
+        → enable turns
+          → aggregate application READY
 ```
 
-Continuous READY additionally requires a bounded non-destructive BrowserHost readiness predicate. Daemon process health alone is not sufficient.
+This is the reviewed replacement for both the initial tunnel-first sketch and the later BrowserHost-before-daemon sketch.
 
 ### Phase-1 recovery posture
 
-Initial launcher mode deliberately disables automatic daemon restart and avoids tunnel restart underneath active work. Child failure degrades the application; the application itself is the restart boundary.
+Initial launcher qualification keeps broad automatic child recovery disabled. If later enabled:
 
-This prevents daemon-state loss from reopening exact-once submission against a surviving browser tab and prevents tunnel replacement from invalidating non-idempotent Goose Native calls.
+- daemon recovery must restart disabled, rerun the BrowserHost proof and required tunnel readiness, then enable;
+- tunnel recovery must disable admission, drain to idle, restart, wait ready, then enable.
+
+Never restart non-idempotent tool transport underneath active work.
 
 ### Phase-1 quit posture
 
 - `external`: quit leaves daemon/tunnel untouched.
-- `launcher`: bounded drain attempt, then hard-deadline termination of positively owned children, BrowserHost/descriptor cleanup, then exit. Quit must not cancel indefinitely and orphan detached children.
+- `launcher` UI Quit with active work: refuse cleanly and offer explicit Cancel-and-Quit through the existing cancellation path.
+- OS logout/reboot/SIGTERM: disable → bounded drain → cancel-browser-turns on expiry → graceful shutdown → hard-deadline cleanup of positively owned children → BrowserHost/descriptor cleanup → exit.
 
 ### Phase-1 autostart posture
 
@@ -100,34 +118,38 @@ Only after manual integrated qualification should a packaged-build single-author
 
 ## Smallest implementation sequence when authorized
 
-### Slice 1 — ownership and shared readiness foundation
+### Slice 1 — ownership, admission and shared readiness foundation
 
 - add/validate `runtimeOwner` in config;
 - make every supervisor mutating entry point inert/refusing in `external` mode;
+- add `turns_enabled` and authenticated `/admin/enable|disable`;
+- gate `/v1/responses` and `/compact`, not `/v1/models`;
+- keep `/healthz` BrowserHost-independent and keep `accepting_turns` drain-only;
 - share the existing qualified BrowserHost startup proof rather than clone it;
-- add ongoing bounded BrowserHost readiness to provider/application health;
-- reverse launcher-owned child dependency to daemon-before-tunnel;
+- launcher startup becomes daemon-disabled → BrowserHost proof → tunnel → enable → READY;
 - keep autostart frozen;
-- keep automatic daemon/tunnel recovery disabled for the initial launcher path.
+- keep broad automatic daemon/tunnel recovery disabled for initial launcher qualification.
 
 This slice must be behavior-neutral for the existing external path.
 
-### Slice 2 — launcher-owned start/quit contract
+### Slice 2 — launcher quit/termination contract
 
-- explicit launcher-owned startup using the existing supervisor;
-- aggregate READY from BrowserHost + daemon + tunnel;
-- terminating owned-child shutdown with bounded drain and hard cleanup deadline;
+- normal idle launcher quit;
+- active UI Quit refuses and offers Cancel-and-Quit;
+- OS/process termination preserves disable/drain/cancel-before-shutdown before hard owned cleanup;
 - deterministic no-orphan/no-stale-descriptor tests.
 
 ### Slice 3 — bounded live qualification
 
 1. external-mode zero-mutation proof;
-2. launcher startup/readiness;
-3. ordinary read-only ChatGPT-Web turn;
-4. Goose Native/tool-capable turn with exactly one submission and one broker invocation;
-5. continuation/multi-turn with no stale execution reuse;
-6. active-turn quit/reopen with no orphan processes/descriptor;
-7. rollback to external path.
+2. launcher daemon up with turns disabled: `/v1/models` works and `/v1/responses` returns legible 503;
+3. BrowserHost proof → tunnel → enable → aggregate READY;
+4. ordinary read-only ChatGPT-Web turn;
+5. Goose Native/tool-capable turn with exactly one submission and one broker invocation;
+6. continuation/multi-turn with no stale execution reuse;
+7. active UI Quit refusal and explicit Cancel-and-Quit proof;
+8. OS-style termination proof with cancellation before exit and no orphan processes/descriptor;
+9. reopen and rollback to external path.
 
 ### Slice 4 — packaged autostart/cutover
 
@@ -164,7 +186,7 @@ Do not replace Playwright auto-waiting with brittle polling.
 
 Before enabling any launcher-owned **tunnel adoption/recovery** later, determine whether `tunnel-client runtimes cleanup/stop` sees a runtime started through `tunnel-client run --profile...`.
 
-This is **not a blocker for Slice 1** because the reviewed ownership model forbids external adoption and initial launcher mode can require a clean explicit cutover/fresh owned start.
+This is **not a blocker for Slice 1** because the reviewed ownership model forbids external adoption and initial launcher mode requires a clean explicit cutover/fresh owned start.
 
 ## Separate workstreams
 
