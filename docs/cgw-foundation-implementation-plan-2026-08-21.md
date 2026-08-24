@@ -1,248 +1,278 @@
-# CGW foundation-first implementation plan — current state after 2026-08-23 closeout
+# CGW foundation-first implementation plan — current planning authority after 2026-08-24 reboot
 
 ## Purpose and authority
 
-This document is the current **implementation-order/planning authority** for the `goose-chatgpt-web` reliability workstream.
+This document and PR #35 are the current **implementation-order/planning authority** for `goose-chatgpt-web`.
 
-PR #31 remains the chronological incident/evidence ledger. Historical failures, traces and reconstruction details belong there and in its timestamped comments; this document intentionally does not duplicate that evidence trail.
+PR #31 remains the chronological incident/evidence ledger. Do not duplicate its historical trace record here.
 
-The remote planning branch is documentation-only and does not reconcile or contain the materially advanced local `fix/electron-native-liveness` lineage.
+This documentation branch is intentionally separate from the materially advanced local `fix/electron-native-liveness` lineage. Do **not** push, overwrite or reconcile that implementation branch merely to update planning documentation.
 
 ## Current local implementation state
 
-Current local/activated checkpoint:
+Activated diagnostic checkpoint:
 
-`10155028925c1919f6c346f76802e1acad547030`
+`0b89d5ecb912a2977d0bf60d9c3a8fa53ac5cad6`
 
-Qualified semantic parent baseline:
+Qualified behavioral baseline:
 
 `6d4bea17fb3de3cb770cb3d4f21fd31b49019dc8`
 
-`1015502` is a reviewed, diagnostic-only child of the qualified `6d4bea1` baseline. It is active in the development runtime and has zero behavioral authority.
+`0b89d5e` is diagnostic-only. It added `browser_page` connection-step localization plus helper/Electron-main loop-lag observation and passed independent review/full tests. It has zero behavioral authority.
 
-This is local implementation evidence only; do not infer that this documentation branch contains either SHA.
+## Completed reliability foundation — preserve through redesign
 
-## Immediate planning priority
+Keep these gates closed:
 
-### Re-establish a clean manually initiated ChatGPT-Web session
+- **CGW-009 — CLOSED / live-proved:** exact-once submission on the real ChatGPT conversation POST path.
+- **Gate 2A — CLOSED / qualified:** semantic Markdown reconciliation, fail-closed on committed-output mutation/removal.
+- **Gate 2B — CLOSED / qualified:** exact thread-error classification.
+- **CGW-017 — CLOSED / live-qualified:** semantic progress separated from mere adapter liveness; bounded terminal for interrupted/static-running shape.
+- **CGW-013 — CLOSED:** ordinary verification is browser/runtime-hermetic.
+- **CGW-007 / Incident A — CLOSED / qualified:** bounded claim-only typed timeout retry and claim telemetry.
+- **Residual transport-terminal execution retirement — CLOSED / qualified at `6d4bea1`.**
 
-The first priority for the next planning session is **not** another CGW implementation gate by default. It is to establish a clean ordinary/manual `chatgpt-web/high` Goose run again.
+Treat these as invariants to transplant into simpler ownership, not implementation machinery that must be copied wholesale.
 
-Use a manually initiated ordinary Goose session, not Goose Control. One ChatGPT-Web agent at a time.
+CGW-006's historical ~600-second absolute streaming Responses-body deadline has already been repaired upstream in Goose 1.46.0. The active `/Applications/Goose.app` was observed reporting 1.46.0; `~/.local/bin/goose` remains 1.45.0. Do not reimplement CGW-006 locally from the old plan without a specific unresolved dependency.
 
-If the manual run is clean, that is positive ecological evidence that ChatGPT-Web can return to normal source/review work and the planner may resume the remaining CGW sequence below.
+PR #32 / CGW-010 large-context work remains separate unless a dependency is unavoidable.
 
-If the manual run fails in the current pre-submit/control family, preserve the runtime and trace before restarting anything. The active `1015502` discriminator is specifically armed to classify that natural recurrence. Inspect the `cdp-stall-*`, worker-drift and existing BrowserHost/daemon evidence before making another source change.
+## Reboot experiment — completed
 
-Only continue with a CGW issue while ChatGPT-Web is still failing if that issue **directly aligns with the failure currently being observed**. Otherwise pause implementation and keep using ordinary manual ChatGPT-Web workloads as the natural qualification surface.
+The full macOS reboot/login proof was run on 2026-08-24.
 
-Do not manufacture a rare failure solely to trigger instrumentation.
+Correct verdict:
 
-## Current open ChatGPT-Web reliability boundary
+- automatic ChatGPT-Web infrastructure reconstruction: **FAIL / NOT QUALIFIED**;
+- manual canonical post-reboot bring-up: **PASS**;
+- old `reboot proof NOT RUN` status: **superseded**.
 
-Repeated natural manual ChatGPT-Web runs have recently failed before useful model work in several forms, including:
+Exact active runtime remained `0b89d5e`.
 
-- `locator.count()`/composer operations that remain pending for tens to hundreds of seconds;
-- `pressSequentially("@Goose Native")` timing out after partial typing;
-- an enabled `send-button` resolving correctly but `press("Enter")` never settling.
+Independent raw DevTools pre-turn baseline was healthy: `/json/version` total ~17.3 ms; raw WS connect ~46.2 ms; `Browser.getVersion` ~4.86 ms; total raw CDP check ~51.1 ms.
 
-The strongest instrumented recurrence, trace `f4d376de5611`, established that during a 208-second `composer_ready` stall:
+The first post-reboot manually initiated `chatgpt-web/high` run had dramatically healthier startup/control behavior and completed substantial genuine Goose Native work. It later surfaced `chatgpt_retry_circuit_open`. That is a secondary guard; the causal failure that opened the circuit remains unresolved unless later trace evidence establishes it.
 
-- Electron BrowserHost JS main-loop telemetry showed no corresponding stall;
-- BrowserHost control HTTP continued servicing heartbeats;
-- helper liveness continued;
-- Electron-native screenshots continued succeeding;
-- the renderer/compositor remained visibly responsive;
-- the Playwright/CDP automation operation did not settle.
+Do not claim the reboot fixed ChatGPT-Web. The result supports host/runtime accumulated state as a contributor to some earlier severe pathology while leaving other failure classes open.
 
-Therefore the current causal boundary is **below the Electron JS/control orchestration layer, in the Playwright ↔ Chromium CDP automation path**.
+## Current evidence motivating architecture review
 
-Do not reinterpret a visibly responsive renderer as proof that CDP automation is healthy.
+Trace `df0fa0069ad9` remains the strongest pre-reboot discriminator for the severe composer/control-stall family:
 
-### Active diagnostic checkpoint — `1015502`
+- Browser and target CDP probes timed out together and late-resolved together after roughly 34 seconds;
+- Electron BrowserHost main did not show corresponding loop stall;
+- renderer/backend activity remained alive;
+- host VM pressure did not explain the decisive episode.
 
-`1015502` adds one bounded diagnostic episode per turn only after an existing critical Playwright operation becomes slow. It reuses the existing `chromium.connectOverCDP()` automation transport and adds no second DevTools observer connection.
+This narrows one failure toward the shared Playwright-client ↔ Chromium DevTools serving/control segment, but does not prove that CDP itself is universally causal.
 
-The episode measures:
+The architectural issue is broader: current top-level lifecycle ownership is fragmented across Electron BrowserHost, Responses daemon and Secure MCP Tunnel, and the real reboot proof showed the automatic reconstruction contract did not work.
 
-- browser-level CDP: `Browser.getVersion`;
-- target-level CDP: `Runtime.evaluate("1")` on the active page target;
-- worker drift: bounded event-loop lag and CPU delta.
+## Governing architectural decision
 
-Interpretation:
+The prior constraint that Electron must remain BrowserHost-only is relaxed.
 
-- browser probe slow/hung → Chromium browser-process DevTools serving or shared dispatch implicated;
-- browser fast + target slow/hung → per-target inspector/renderer tier implicated;
-- both probes fast while the owning Playwright operation hangs → Playwright/client machinery implicated;
-- material worker drift overlapping the episode → Node worker scheduling/starvation becomes relevant.
+Primary goal:
 
-Known limitation: because both probes intentionally reuse the same native CDP transport, a result where both probes are silent cannot by itself distinguish browser-process DevTools failure from shared WebSocket/IPC dispatch congestion. Do not add a second observer connection merely to remove that ambiguity unless later evidence makes it necessary.
+```text
+one ChatGPT-Web application
+one top-level owner
+one restart boundary
+one readiness contract
+```
 
-The diagnostic does not change retries, timeouts, cancellation, liveness, surface ownership, error classification or recovery behavior.
+Secondary goal:
 
-## Architecture invariants
+```text
+minimise idle resources where that stays simple
+```
 
-Unless new contradictory evidence appears:
+The replacement boundary moves upward:
 
-1. Goose owns durable logical session/history, tools, orchestration, cancellation and context lifecycle.
-2. A genuinely new human turn gets fresh provider execution identity; prompt-content equality is not an idempotency contract.
-3. Exact transport retries and tool-result rounds of the same owning turn may retain that turn's execution identity.
-4. Independently owned Goose operations may overlap; do not serialize by `agent-session-id` merely to eliminate multiple surfaces.
-5. Browser/Temporary-Chat state is disposable and must not become canonical conversation state.
-6. Electron/BrowserHost native lifecycle/network evidence outranks weak DOM/Playwright symptoms where native evidence is available.
-7. Passive observability must not acquire request-blocking or behavioral authority.
-8. Keep the Goose → Responses daemon → Electron BrowserHost → helper/Playwright topology unless substantially stronger evidence requires redesign.
+- Goose remains one application and the durable logical agent/session/tool/context authority.
+- ChatGPT-Web becomes one self-contained provider application.
+- Electron is today's implementation candidate for that application.
+- If Electron later proves unsuitable, replace the whole ChatGPT-Web provider application behind the same stable Goose-facing contract.
+
+Process separation remains allowed where useful. The simplification is one top-level lifecycle owner, not a forced monolith.
+
+## Candidate north-star boundary
+
+```text
+Goose
+  │ stable provider contract
+  │ default candidate: Responses-compatible HTTP/SSE
+  ▼
+ChatGPT-Web Application
+  ├─ Responses/provider endpoint
+  ├─ authenticated ChatGPT browser
+  ├─ browser surfaces and automation
+  ├─ provider execution/retry state
+  ├─ Goose Native bridge
+  ├─ MCP server / secure tunnel
+  ├─ helper children where useful
+  ├─ health/readiness
+  └─ startup/shutdown/reconstruction
+```
+
+Goose continues to own sessions/history, context/compaction, tools/approvals, delegation and project execution. Browser chats remain disposable transport/cache state.
+
+Do not assume ACP is the right primary boundary merely because it is an agent protocol. ChatGPT-Web is functioning primarily as a Goose **model provider**. Preserve the existing Responses-compatible provider contract in Phase 1 unless scouting identifies a materially better native Goose provider boundary.
+
+MCP/Goose Native remains the likely reverse tool path, with MCP/tunnel machinery internalized under the ChatGPT-Web application owner.
+
+## PR #33 / resource policy
+
+The earlier provider-demand/low-resource design is now secondary.
+
+Lazy startup of Chromium or other expensive children is desirable only if it falls out naturally inside the single owner. If it adds lifecycle complexity, cross-process coordination, special recovery or weakens `open ChatGPT-Web → provider appliance READY`, defer it.
+
+## Mandatory parallel / rollback-capable migration
+
+Do **not** rebuild by tearing down the working `0b89d5e` path first.
+
+```text
+existing provider path        remains available
+         │
+         ├── current known-good/diagnostic baseline
+         │
+new integrated app path       developed alongside it
+```
+
+Phase 1 should consolidate lifecycle/ownership while preserving the current Goose-facing Responses contract and as much existing browser behavior as practical.
+
+Required integrated-mode proof sequence:
+
+1. app starts all required internal infrastructure;
+2. health/readiness passes;
+3. ordinary read-only ChatGPT-Web turn passes;
+4. Goose Native/tool-capable turn passes;
+5. continuation/multi-turn passes;
+6. quit/reopen reconstruction passes;
+7. only then make integrated mode the normal path;
+8. retain the old path briefly as rollback;
+9. delete old independent-supervision machinery only after replacement proof.
+
+Development may be substantial; ChatGPT-Web must not be unavailable throughout the rebuild. Downtime is limited to bounded qualification/cutover windows.
+
+The design and Opus review must reject any architecture that violates this availability/rollback requirement.
+
+## Phase 2 question — Playwright/CDP critical path
+
+Treat browser-control redesign as a separate layer from lifecycle consolidation.
+
+Current external path is approximately:
+
+```text
+helper/worker
+  → Playwright
+      → remote CDP
+          → Electron/Chromium
+              → ChatGPT
+```
+
+Evaluate, stage by stage, whether Electron-owned facilities can reduce complexity:
+
+- `webContents` navigation/load events;
+- trusted input;
+- narrowly scoped `executeJavaScript`;
+- preload/contextBridge/IPC where safe;
+- `session.webRequest`;
+- `webContents.debugger` as a possible intermediate Electron-owned CDP path.
+
+Potential migration order:
+
+1. navigation/readiness;
+2. effort selection;
+3. connector attachment;
+4. prompt insertion;
+5. submission;
+6. response observation;
+7. tool continuation;
+8. completion/error observation.
+
+Keep the old path as reference/diagnostic while migrating. Do not remove Playwright merely for ideological purity, and do not replace its useful auto-waiting with brittle custom polling.
+
+## Verified upstream direction so far
+
+Current upstream `miuuyy/codex-chatgpt-web` is newer than the earlier handoff snapshot; `main` has reached release **v3.0.2** on 2026-08-24.
+
+Current upstream architecture explicitly makes the launcher the sole process supervisor across macOS/Windows/Linux while retaining a Responses-compatible provider surface and Playwright attached to launcher-owned Electron surfaces over loopback CDP. Upstream also contains historical Electron-owned trusted-input work using `webContents.debugger`, but present `main` must be inspected carefully to determine what was retained, removed or superseded.
+
+Do not blindly rebase onto upstream. Use it as a source of architecture simplification, deletions and transplantable lifecycle/browser-control ideas while preserving fork-qualified reliability invariants.
+
+## Required scouting before design freeze
+
+### A. Current ownership/process map
+
+Establish from current source:
+
+- every top-level runtime process;
+- who starts/supervises/stops it;
+- crash/restart/readiness behavior;
+- launchd ownership;
+- descriptor/socket identities;
+- which ownership boundaries exist only because of the earlier Electron-replaceability policy.
+
+Return which boundaries disappear under one application owner.
+
+### B. Browser-control critical-path map
+
+Trace BrowserHost creation → surface creation → Playwright/CDP connection → navigation → Temporary Chat readiness → effort → Goose Native attachment → prompt insertion → submit → response observation → tool continuation → completion/reconciliation → cleanup/recovery.
+
+For each stage classify whether it genuinely needs Playwright, can cleanly use Electron-native control, can use preload/contextBridge, can use `webContents.debugger`, or should remain unchanged initially.
+
+### C. Reliability invariant map
+
+Locate implementation ownership for exact-once send, semantic reconciliation, error classification, progress/liveness, retry claim, terminal retirement, surface cleanup, execution identity and tool continuation.
+
+### D. Current-upstream delta
+
+Compare current fork with current upstream only for lifecycle supervision, Electron/browser integration, Playwright/CDP boundary, direct Electron browser control, MCP/tunnel ownership, provider boundary, recovery/retry, auth/session handling and macOS/Linux portability.
+
+## Mandatory fresh Opus adversarial review
+
+After the planner has one coherent design and a precise current → target architecture/code diff, send design + diff + upstream findings + relevant failure evidence to a **fresh Opus** agent.
+
+Opus should try to break the proposal, especially for:
+
+- circular lifecycle dependencies;
+- self-interference/deadlocks/restart loops/failure amplification;
+- provider availability during browser restart;
+- MCP/tunnel reconnect semantics;
+- tool continuation across child restart;
+- execution identity/retry-circuit ownership;
+- stale state after partial crashes;
+- exact-once/reconciliation/progress regressions;
+- preload/IPC/remote-content security;
+- Electron main-thread blocking;
+- merely relocating the same CDP problem;
+- replacing Playwright auto-waiting with fragile polling;
+- macOS/Linux implications;
+- migration/rollback and existing user state;
+- opportunities to delete more machinery;
+- useful upstream solutions already available.
+
+Instruction to Opus: **prefer lean structural fixes and deletion over additional watchdogs/retries/instrumentation.**
+
+Reconcile real Opus findings into the plan before implementation.
 
 ## Governing design principles
 
-Use these principles when selecting or reviewing any repair:
+- native before custom;
+- prevent before recover;
+- leanest adequate solve;
+- evidence before mechanism;
+- retries only at native/idempotent boundaries;
+- observability remains observational;
+- timeouts are safety nets, not normal control flow;
+- deterministic proof first, ecological evidence second;
+- prefer one clear owner over cross-process coordination where replaceability can live at the external contract;
+- delete machinery rather than add recovery logic where possible.
 
-- **Native before custom.** Prefer the authority already owned by Goose, the daemon, BrowserHost/Electron, or Chromium rather than parallel state machines or replacement infrastructure.
-- **Prevent before recovering.** Prefer correcting ownership, lifecycle, state transitions, scheduling, backpressure or another causal condition so the invalid/degraded state does not arise. Retries, timeouts, cleanup and recovery remain safety boundaries, not the primary mechanism that makes normal operation reliable.
-- **Leanest adequate solve.** Simplify/remove duplicated state before adding new mechanisms. Keep contracts small, explicit and testable.
-- **Evidence before mechanism.** Localize the owning layer before implementing. Do not promote correlation, visible UI responsiveness or generic timeout symptoms into causal claims.
-- **Resilience at natural idempotent boundaries.** Add bounded retry/recovery only where ownership and idempotency already make it safe.
-- **Observability is observational.** Telemetry may explain behavior but must not silently become behavior authority.
-- **Timeouts are safety nets.** Do not solve normal-operation reliability by casually increasing global deadlines or layering retries around an unknown obstruction.
-- **Deterministic proof first, ecological evidence second.** Use hermetic tests for known contracts and ordinary useful ChatGPT-Web workloads for natural runtime qualification.
+## Stop boundary
 
-Cross-repo policy relationship: Day Shift `docs/goose-boundary.md` is the highest-level native-first build/no-build authority; the Day Shift technical-development-loop workstream is the proper home for the broader engineering-loop principles; Day Shift PR #22 is the canonical inside-Goose delegation policy. This CGW plan applies those principles locally rather than redefining them.
+No integrated-app implementation, destructive reconciliation, merge/rebase/reset, old-path deletion or normal-path cutover is authorized yet.
 
-## Foundation gates — completed
-
-### CGW-009 — CLOSED / live-proved
-
-Final matcher checkpoint:
-
-`a16c51a25866c84f209e6df09bc521c2c051461e`
-
-Exact-once submission is live-proved on the real current route `POST /backend-api/f/conversation`, with owned send epoch/trace/surface, matching Electron request ID, matching 2xx response-start and exactly-one-Enter behavior.
-
-### Gate 2A — CLOSED / qualified
-
-Checkpoint:
-
-`f0961960d210776a7498cd7b0b78318a9fdc5e1a`
-
-Completed-stream reconciliation uses cumulative semantic-Markdown prefix/coverage rather than fragile positional DOM identity, preserves meaningful Markdown/whitespace, never retransmits committed output and fails closed on genuine committed semantic mutation/removal.
-
-### Gate 2B / Incident B — CLOSED / qualified
-
-Checkpoint:
-
-`d9a16e4af44be4fbb147c9bc7bb365972d375f26`
-
-The exact `regenerate-thread-error-button` state is classified as a retryable ChatGPT thread-error terminal rather than waiting for the generic missing-completion-action watchdog. Partial output remains irreversible and the error stub is not committed as answer text.
-
-### CGW-017 — CLOSED / live-qualified
-
-Checkpoint:
-
-`136a3bf828e0e4c3d8238bc5089857c1237af204`
-
-Adapter heartbeats no longer masquerade as semantic progress; genuine progress can continue indefinitely, while readable static `running=true` + connection-interrupted evidence has a bounded retryable terminal.
-
-### CGW-013 — CLOSED
-
-Foundation checkpoint:
-
-`64f006bed52b0c3366178c3be11f71acf1c397c2`
-
-Ordinary `bun run verify` is browser/runtime-hermetic. Managed-Chrome compatibility remains explicit behind `bun run smoke:managed-chrome` and retained deliberately in macOS CI/release.
-
-### CGW-007 / Incident A — CLOSED / qualified
-
-Checkpoint:
-
-`e51bd44c62c7e0a5c9f8249f0ab04ad2c53d17d9`
-
-Broker `claim` remains prompt-return and idempotent. The repair adds a bounded claim-only retry for typed response-start/response-settlement timeout classes without inflating the per-attempt five-second liveness bound, plus privacy-safe client/server claim telemetry and daemon loop-lag observation.
-
-Out-of-band activation and an ordinary ChatGPT-Web High qualification passed. CGW-007 is no longer the next implementation item.
-
-### Residual transport-terminal execution retirement — CLOSED / qualified baseline
-
-Qualified checkpoint:
-
-`6d4bea17fb3de3cb770cb3d4f21fd31b49019dc8`
-
-A natural upstream zero-visible-output stall exposed a deterministic local residual lifecycle defect: transport-decided terminal failures could leave the exact-key provider session reusable after broker revocation, causing a same-key retry to inherit stale/revoked execution state.
-
-The qualified repair retires the exact-key session only when the caught error is causally the exact existing `withAbort()` transport abort product, preserving conservative settled replay for genuinely ambiguous worker-origin failures in standalone and non-standalone modes.
-
-Independent review passed. OOB activation passed. An ordinary first turn plus a genuine second human turn in the same Goose session both passed with fresh execution keys, no stale token replay, no unexpected circuit-open state and clean settlement.
-
-## Paused foundation item
-
-### CGW-006 — healthy streaming lifetime
-
-The root cause remains established in Goose's custom OpenAI/Responses provider: the default ~600-second timeout is applied as an absolute request/body lifetime.
-
-Required contract remains:
-
-- no absolute total response-body lifetime for a healthy streaming Responses request;
-- explicit caller cancellation remains authoritative;
-- connection/setup bounds may remain;
-- any stalled-stream bound must be genuine inactivity/read/progress semantics that reset on successful reads;
-- non-streaming timeout behavior remains unchanged;
-- preserve underlying network/reqwest causality.
-
-Proof should be hermetic and scaled with a local SSE server; do not use a 600-second wall-clock ChatGPT run and do not replace 600 seconds with an arbitrarily huge absolute timeout.
-
-**Current status: PAUSED.** Do not resume CGW-006 merely because it was previously next in the foundation order. Resume it only when manual ChatGPT-Web sessions are clean again or when current evidence shows the active failure is materially the ~600-second body-lifetime class.
-
-## Conditional qualification / implementation sequence
-
-After a clean manually initiated ChatGPT-Web run is re-established, or when current evidence directly aligns with one of these items, continue in this order unless new evidence changes the dependency:
-
-1. **Current-head ordinary manual ChatGPT-Web qualification/use.** Keep using useful real workloads; a genuine second human turn remains valuable evidence when practical.
-2. **CGW-006**, if still relevant and not superseded by newer evidence.
-3. **CGW-010 large-context qualification** at the remaining PR #32 qualification gate; core ~19.7k-character context-feed mechanics are already proven.
-4. **Manual concurrency requalification:** parent + 1, then parent + 2 ChatGPT-Web children.
-5. **Goose Control route qualification:** only after the ordinary manual provider path is dependable and GC write/start/continuation use is explicitly reopened.
-6. **Deferred recovery/lifecycle/resource work:** CGW-005, CGW-011, CGW-012, memory/resource attribution and non-gating stress/simplification work as evidence warrants.
-
-Do not mechanically advance this list while the current ordinary ChatGPT-Web failure class remains unexplained.
-
-## Goose Control posture
-
-Goose Control is currently **read-only for this planning workstream**.
-
-- Do not start new ChatGPT-Web sessions through Goose Control.
-- Do not use GC continuation as a workaround for ordinary ChatGPT-Web failures.
-- Read-only inspection/status of a known session is acceptable when it materially helps diagnosis.
-- Keep GC/ACP/session-list/start-route defects separate from ChatGPT-Web BrowserHost/provider failures.
-- Re-open GC start/continuation qualification only after the ordinary manually initiated ChatGPT-Web path is stable enough to make GC failures interpretable.
-
-## Agent-routing posture
-
-- ChatGPT-Web **High** is the preferred ChatGPT-Web model whenever success/failure itself gives useful ecological evidence about ChatGPT-Web.
-- Use ChatGPT-Web for ordinary real work as soon as a clean manual run is plausible; do not wait for an artificial grand requalification.
-- If a ChatGPT-Web turn fails after useful context/work exists, prefer switching the **same Goose session** to Ox Alpha or Sonnet for rescue rather than discarding the session.
-- Use **Ox Alpha by preference** for source forensics, long investigations, implementation, activation/qualification and other work where ChatGPT-Web itself is merely instrumental. Make substantial use of the available Ox budget.
-- Unpinned native async Ox delegates are appropriate for genuinely parallel read-only/source/test strands when the parent owns integration and writes do not overlap.
-- Sonnet is primarily a cross-family independent reviewer/escalation route while ChatGPT-Web is unreliable or when independent semantics review is valuable.
-- Opus is a limited escalation resource after competent Ox passes fail/conflict/circle or for unusually high-risk semantic review.
-- One ChatGPT-Web agent at a time.
-
-## Qualification discipline
-
-- Prefer natural useful/ecological workloads after deterministic coverage exists.
-- Do not retry an unclassified ChatGPT-Web failure merely to obtain a pass.
-- Preserve a natural failure trace before restarting the runtime.
-- Do not add heavier instrumentation unless the active corpus exposes a specific discriminating evidence gap.
-- Keep evidence causal and privacy-safe.
-- A higher-level pass may require requalification when a lower-level foundation changes materially.
-- Harness/tool-policy blocks are not BrowserHost failures without direct evidence.
-
-## Branch and PR relationship
-
-This planning PR remains documentation-only and intentionally starts from `main`.
-
-It does **not** reconcile, push or overwrite the local `fix/electron-native-liveness` implementation lineage. Local checkpoint `10155028925c1919f6c346f76802e1acad547030` is a planning reference, not a commit on this documentation branch.
-
-PR #31 remains open as the chronological incident/evidence ledger. Its older body is historical context and must not override this current planning document or the newer timestamped evidence comments.
-
-PR #32 remains the dedicated CGW-010 design/evidence stream and resumes only when the current manual ChatGPT-Web path is sufficiently stable or evidence directly calls for that work.
-
-Before eventual final merge/closeout of the reliability workstream, deliberately reconcile local implementation history with remote PR history, preserve protected local scripts/intentional state, verify exact final HEAD, update canonical statuses from actual evidence, and leave merge/close decisions to the human operator.
+Finish documentation reconciliation, current/upstream scouting, coherent architecture, current→target diff and fresh Opus adversarial review. Then return the reconciled implementation plan for user review before implementation.
