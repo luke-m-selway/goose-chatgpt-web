@@ -16,6 +16,12 @@ Before architecture, lifecycle, BrowserHost, tunnel, or Goose Control work, read
 
 Current documentation outranks historical roadmap material and draft PR designs. Draft PR #25 and PR #26 are design inputs only after the documentation reconciliation on current `main`.
 
+## Check upstream before new diagnosis
+
+Before diagnosing a new ChatGPT-Web UI, browser, authentication, lifecycle, or compatibility problem from scratch, check current upstream `miuuyy/codex-chatgpt-web` first, including recent commits, issues, and pull requests: https://github.com/miuuyy/codex-chatgpt-web
+
+Reuse or adapt an upstream fix when it fits. Do not blindly replace Goose-specific architecture or unrelated live state; investigate locally only where upstream does not already explain the symptom or where this fork intentionally differs.
+
 ## Host/session safety
 
 - Preserve ignored `.env` files, browser authentication state, runtime keys, credentials, and unrelated local proof artifacts unless the task explicitly authorizes changing them.
