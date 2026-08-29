@@ -1,44 +1,91 @@
 # Documentation map
 
-This directory is the authoritative handoff for the current Goose-first runtime and the next active project milestone.
+This directory is the authoritative handoff for the current Goose-first ChatGPT-Web runtime and the reviewed integrated-runtime implementation plan.
 
 ## Status labels
 
-- **current/proven** — implemented and exercised against the named/current revision; safe to use as the present operating contract.
-- **active** — the next implementation milestone; design decisions are current, but implementation/proof is not complete yet.
-- **provisional** — a current design detail that still has an explicitly named proof or decision outstanding.
-- **deferred** — intentionally later work, not a first-proof requirement.
-- **historical** — superseded engineering evidence retained in Git/old PRs; not an operating instruction.
+- **current/proven** — implemented and exercised against the named/current revision.
+- **reviewed plan** — passed current-source scouting plus fresh adversarial review, but is not implementation truth yet.
+- **provisional** — a design detail with a named proof/decision outstanding.
+- **deferred** — intentionally later work.
+- **historical** — superseded evidence retained in Git/PR history; not an operating instruction.
 
-## Current/proven runtime documentation
+## Current/proven runtime sources
 
-- [`../README.md`](../README.md) — current project shape and status.
-- [`architecture.md`](architecture.md) — ownership and request/tool flow.
-- [`runtime-lifecycle.md`](runtime-lifecycle.md) — canonical lifecycle, BrowserHost readiness, macOS autostart, and remaining reboot proof.
-- [`security-model.md`](security-model.md) — current trust/capability boundaries.
-- [`../AGENTS.md`](../AGENTS.md) — mandatory runtime/safety rules for agents.
+- [`architecture.md`](architecture.md) — current runtime plus reviewed target architecture.
+- [`runtime-lifecycle.md`](runtime-lifecycle.md) — current lifecycle/reboot evidence plus reviewed ownership/readiness/cutover contract.
+- [`security-model.md`](security-model.md) — current trust boundaries plus fail-closed ownership requirements.
+- [`chatgpt-web-reliability-closeout.md`](chatgpt-web-reliability-closeout.md) and PR #31 — reliability/evidence history.
+- [`../AGENTS.md`](../AGENTS.md) — mandatory runtime/safety rules for implementation agents.
 
-The qualified runtime base is the Electron checkpoint `c624274` plus current-main autostart commit `dd44b74`.
+Current activated local diagnostic checkpoint is `0b89d5ecb912a2977d0bf60d9c3a8fa53ac5cad6` (`0b89d5e`), a diagnostic-only child of qualified behavioral baseline `6d4bea17fb3de3cb770cb3d4f21fd31b49019dc8` (`6d4bea1`). This PR #35 documentation branch does not contain or reconcile that local implementation lineage.
 
-## Active milestone
+## Actual reboot/login status
 
-- [`goose-control-plan.md`](goose-control-plan.md) — Goose Control is the next active milestone. Its backend is settled on authenticated loopback Goose ACP; its first Planner-facing proof is a private GPT Action calling a narrow authenticated HTTPS REST/OpenAPI facade.
-- [`roadmap.md`](roadmap.md) — current and next work only.
+The full reboot/login proof was run on 2026-08-24.
 
-## Provisional / not yet proven
+- automatic ChatGPT-Web infrastructure reconstruction: **FAIL / NOT QUALIFIED**;
+- manual canonical bring-up: **PASS**;
+- first post-reboot manual ChatGPT-Web run had materially healthier startup/control behavior and substantial successful tool-backed work, then surfaced `chatgpt_retry_circuit_open` after an unresolved causal failure.
 
-The actual Mac **reboot/login → automatic reconstruction → ordinary Goose first turn → separate dependent `--resume`** proof has not been run. Ordered autostart is implemented and live-checked without that reboot boundary.
+The old `reboot proof NOT RUN` status is superseded. Do not claim reboot fixed ChatGPT-Web.
 
-No document may silently upgrade that item to proven status.
+## Planning authority and status
 
-## Deferred
+PR #35 and [`cgw-foundation-implementation-plan-2026-08-21.md`](cgw-foundation-implementation-plan-2026-08-21.md) are the current planning authority.
 
-For Goose Control, asynchronous `submit_task → job_id → get_job`, cancellation, multi-target registries, approved fresh-session creation, and a persistent Orchestrator/Palmate layer are later phases. They are not requirements for the first synchronous continuation proof.
+The mandatory pre-implementation sequence is complete:
 
-## Historical/design inputs
+1. documentation/evidence reconciliation;
+2. current fork + current upstream inspection;
+3. exact-local `0b89d5e` Ox scout;
+4. coherent architecture/current→target diff;
+5. fresh Opus adversarial review (`REVISE`);
+6. reconciliation of the Opus findings.
 
-- Draft PR #25 refined Goose Control around native ACP and remains useful design evidence, but its write-capable custom-MCP-first Planner surface and async-first MVP are superseded by the current `goose-control-plan.md`.
-- Draft PR #26 proposed a useful documentation split and lifecycle clarification, but its pre-autostart provisional runtime status is superseded by current `main` plus this reconciliation.
-- The previous long chronological roadmap remains available in Git history at `dd44b74`; use it for archaeology only, not for current priorities or lifecycle instructions.
+The workstream is now at the explicit **STOP-before-implementation** boundary.
 
-When historical material conflicts with current code/proofs and the current documents above, use the current documents.
+## Reviewed Phase-1 direction
+
+Primary goal:
+
+```text
+one ChatGPT-Web application
+one top-level owner
+one restart boundary
+one readiness contract
+```
+
+Secondary goal: minimise idle resources only where that stays simple.
+
+Key reviewed decisions:
+
+- reuse/adapt the existing Electron `RuntimeSupervisor`; do not build a second supervisor;
+- add persisted `runtimeOwner = external | launcher`;
+- `external` mode is completely non-mutating for daemon/tunnel, including on quit;
+- launcher ownership begins only after explicit operator-controlled transfer;
+- shared qualified BrowserHost startup proof remains authoritative;
+- continuous READY also includes a bounded non-destructive BrowserHost-ready predicate;
+- launcher-owned startup is BrowserHost proof → daemon/broker → tunnel → aggregate READY;
+- automatic daemon restart is disabled in initial launcher mode;
+- tunnel must not restart underneath active/non-idempotent work;
+- launcher quit is terminating with bounded drain + hard owned-child cleanup deadline;
+- autostart is frozen until manual integrated qualification, then proven only in a packaged single-authority reboot test;
+- existing `0b89d5e` path remains available as rollback until replacement proof.
+
+## Phase 2 boundary
+
+Browser-control redesign remains separate.
+
+Observation/reconciliation is already substantially Electron-native. Prefer consolidating that observation first and keep one proven Playwright/CDP control path until individual controls can be replaced with their waiting/exact-once semantics preserved atomically.
+
+Do not assume `webContents.debugger` removes the DevTools failure family; prefer genuinely native primitives such as `sendInputEvent`, native navigation/load events, narrow `executeJavaScript`, and `session.webRequest` where appropriate.
+
+## Workstream boundaries
+
+- PR #31 — chronological incident/evidence ledger.
+- PR #32 / CGW-010 — separate large-context workstream.
+- PR #33 — demand-start/resource policy; secondary optimization.
+- Goose Control — belongs in `luke-m-selway/day-shift` and remains provider-agnostic.
+
+When historical material conflicts with the current planning surfaces above, preserve history but follow the current authority.
