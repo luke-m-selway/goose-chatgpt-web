@@ -184,7 +184,7 @@ Do not use it merely as a last-edited date.
 ### `superseded_by`
 
 ```yaml
-superseded_by: 0012-native-goose-delegation.md
+superseded_by: replacement-decision.md
 ```
 
 Use only with `status: superseded`. Point directly to the replacement when one exists.
@@ -192,7 +192,7 @@ Use only with `status: superseded`. Point directly to the replacement when one e
 ### `source_of_truth`
 
 ```yaml
-source_of_truth: .agents/skills/routing/ROUTES.yaml
+source_of_truth: config/routes.yaml
 ```
 
 Use when exact authoritative values live elsewhere and this document explains or presents them.
