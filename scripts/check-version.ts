@@ -18,19 +18,30 @@ if (packageJson.devDependencies?.["@types/bun"] !== bunVersion) {
   throw new Error(`@types/bun is not synchronized to ${bunVersion}`);
 }
 if (packageJson.engines?.bun !== bunVersion) throw new Error(`engines.bun is not synchronized to ${bunVersion}`);
-const expected = [
+
+const packageVersionExpected = [
   ["src/version.ts", `export const VERSION = ${JSON.stringify(packageVersion)};`],
   ["scripts/install.sh", `VERSION=\"\${CODEX_CHATGPT_WEB_VERSION:-${packageVersion}}\"`],
-  ["README.md", `requires Bun ${bunVersion}.`],
-  ["README.zh-CN.md", `Bun ${bunVersion}`],
+] as const;
+for (const [path, needle] of packageVersionExpected) {
+  if (!readFileSync(resolve(root, path), "utf8").includes(needle)) {
+    throw new Error(`${path} is not synchronized to package version ${packageVersion}`);
+  }
+}
+
+// Exact tool versions belong to executable/build surfaces, not README prose, so routine toolchain bumps do not stale documentation.
+const bunVersionExpected = [
   ["scripts/install.sh", `Bun-${bunVersion}.md`],
   ["scripts/generate-third-party-notices.ts", `Bun ${bunVersion}`],
   [".github/workflows/ci.yml", `bun-version: ${bunVersion}`],
   [".github/workflows/release.yml", `Bun-${bunVersion}.md`],
 ] as const;
-for (const [path, needle] of expected) {
-  if (!readFileSync(resolve(root, path), "utf8").includes(needle)) throw new Error(`${path} is not synchronized to ${packageVersion}`);
+for (const [path, needle] of bunVersionExpected) {
+  if (!readFileSync(resolve(root, path), "utf8").includes(needle)) {
+    throw new Error(`${path} is not synchronized to Bun ${bunVersion}`);
+  }
 }
+
 const releaseWorkflow = readFileSync(resolve(root, ".github/workflows/release.yml"), "utf8");
 if (releaseWorkflow.split(`bun-version: ${bunVersion}`).length - 1 !== 2) {
   throw new Error(`release.yml must pin Bun ${bunVersion} in both jobs`);
