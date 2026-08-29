@@ -146,13 +146,14 @@ test("invalid helper protocol is cleaned up and the next turn respawns a fresh h
   const root = mkdtempSync(join(tmpdir(), "goose-launcher-helper-protocol-respawn-"));
   roots.push(root);
   const attempts = join(root, "attempts.txt");
+  const attemptsLiteral = JSON.stringify(attempts);
   const helper = join(root, "helper.cjs");
   writeFileSync(helper, `
     const fs = require("node:fs");
     const readline = require("node:readline").createInterface({ input: process.stdin });
     let attempt = 1;
-    try { attempt = Number(fs.readFileSync(${JSON.stringify("ATTEMPTS_PLACEHOLDER")}, "utf8")) + 1; } catch {}
-    fs.writeFileSync(${JSON.stringify("ATTEMPTS_PLACEHOLDER")}, String(attempt));
+    try { attempt = Number(fs.readFileSync(${attemptsLiteral}, "utf8")) + 1; } catch {}
+    fs.writeFileSync(${attemptsLiteral}, String(attempt));
     const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
     send({ type: "ready" });
     readline.on("line", line => {
@@ -165,7 +166,7 @@ test("invalid helper protocol is cleaned up and the next turn respawns a fresh h
       }
       send({ type: "result", id: message.id, text: "respawned" });
     });
-  `.replaceAll("ATTEMPTS_PLACEHOLDER", attempts), { mode: 0o700 });
+  `, { mode: 0o700 });
   const descriptorPath = join(root, "launcher.json");
   writeFileSync(descriptorPath, `${JSON.stringify({
     version: 1,
@@ -209,13 +210,14 @@ test("helper process exit is cleaned up and a later turn respawns successfully",
   const root = mkdtempSync(join(tmpdir(), "goose-launcher-helper-exit-respawn-"));
   roots.push(root);
   const attempts = join(root, "attempts.txt");
+  const attemptsLiteral = JSON.stringify(attempts);
   const helper = join(root, "helper.cjs");
   writeFileSync(helper, `
     const fs = require("node:fs");
     const readline = require("node:readline").createInterface({ input: process.stdin });
     let attempt = 1;
-    try { attempt = Number(fs.readFileSync(${JSON.stringify("ATTEMPTS_PLACEHOLDER")}, "utf8")) + 1; } catch {}
-    fs.writeFileSync(${JSON.stringify("ATTEMPTS_PLACEHOLDER")}, String(attempt));
+    try { attempt = Number(fs.readFileSync(${attemptsLiteral}, "utf8")) + 1; } catch {}
+    fs.writeFileSync(${attemptsLiteral}, String(attempt));
     const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
     send({ type: "ready" });
     readline.on("line", line => {
@@ -225,7 +227,7 @@ test("helper process exit is cleaned up and a later turn respawns successfully",
       if (attempt === 1) process.exit(17);
       send({ type: "result", id: message.id, text: "respawned-after-exit" });
     });
-  `.replaceAll("ATTEMPTS_PLACEHOLDER", attempts), { mode: 0o700 });
+  `, { mode: 0o700 });
   const descriptorPath = join(root, "launcher.json");
   writeFileSync(descriptorPath, `${JSON.stringify({
     version: 1,
@@ -269,13 +271,14 @@ test("a live-but-silent helper is terminated and the next turn respawns a fresh 
   const root = mkdtempSync(join(tmpdir(), "goose-launcher-helper-heartbeat-respawn-"));
   roots.push(root);
   const attempts = join(root, "attempts.txt");
+  const attemptsLiteral = JSON.stringify(attempts);
   const helper = join(root, "helper.cjs");
   writeFileSync(helper, `
     const fs = require("node:fs");
     const readline = require("node:readline").createInterface({ input: process.stdin });
     let attempt = 1;
-    try { attempt = Number(fs.readFileSync(${JSON.stringify("ATTEMPTS_PLACEHOLDER")}, "utf8")) + 1; } catch {}
-    fs.writeFileSync(${JSON.stringify("ATTEMPTS_PLACEHOLDER")}, String(attempt));
+    try { attempt = Number(fs.readFileSync(${attemptsLiteral}, "utf8")) + 1; } catch {}
+    fs.writeFileSync(${attemptsLiteral}, String(attempt));
     const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
     send({ type: "ready" });
     readline.on("line", line => {
@@ -286,7 +289,7 @@ test("a live-but-silent helper is terminated and the next turn respawns a fresh 
       setTimeout(() => send({ type: "event", id: message.id, event: "heartbeat" }), 80);
       setTimeout(() => send({ type: "result", id: message.id, text: "respawned-after-heartbeat-expiry" }), 240);
     });
-  `.replaceAll("ATTEMPTS_PLACEHOLDER", attempts), { mode: 0o700 });
+  `, { mode: 0o700 });
   const descriptorPath = join(root, "launcher.json");
   writeFileSync(descriptorPath, `${JSON.stringify({
     version: 1,
