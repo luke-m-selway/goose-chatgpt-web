@@ -29,7 +29,7 @@ for (const [path, needle] of packageVersionExpected) {
   }
 }
 
-// Exact tool versions belong to executable/build surfaces, not README prose, so routine toolchain bumps do not stale documentation.
+// Keep exact tool versions out of README prose so routine toolchain bumps do not make docs stale.
 const bunVersionExpected = [
   ["scripts/install.sh", `Bun-${bunVersion}.md`],
   ["scripts/generate-third-party-notices.ts", `Bun ${bunVersion}`],
