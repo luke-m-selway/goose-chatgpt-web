@@ -5,6 +5,7 @@ import type { AppConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
 import type { TunnelRuntimeStatus } from "./tunnel";
+import { recordChatGptProcessEvent } from "./observations/flight-recorder";
 
 export const TUNNEL_SERVICE_LABEL = "io.github.codex-chatgpt-web.tunnel";
 const TUNNEL_HEALTH_TIMEOUT_MS = 3_000;
@@ -15,6 +16,7 @@ export interface TunnelServiceStatus {
   installed: boolean;
   loaded: boolean;
   running: boolean;
+  pid?: number;
   label: string;
   definitionPath?: string;
 }
@@ -206,11 +208,13 @@ export function getTunnelServiceStatus(): TunnelServiceStatus {
   }
   const path = plistPath();
   const result = runCommand("launchctl", ["print", serviceTarget()]);
+  const pid = Number(/^\s*pid = (\d+)\s*$/m.exec(result.stdout)?.[1] ?? 0);
   return {
     supported: true,
     installed: existsSync(path),
     loaded: result.status === 0,
     running: result.status === 0 && /^\s*state = running\s*$/m.test(result.stdout),
+    ...(Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
     label: TUNNEL_SERVICE_LABEL,
     definitionPath: path,
   };
@@ -243,7 +247,13 @@ export function startTunnelService(): TunnelServiceStatus {
   assertMacOs();
   if (!existsSync(plistPath())) throw new Error("Tunnel service is not installed; rerun full setup");
   if (!getTunnelServiceStatus().loaded) runChecked("launchctl", ["bootstrap", launchDomain(), plistPath()]);
-  return getTunnelServiceStatus();
+  const status = getTunnelServiceStatus();
+  recordChatGptProcessEvent("secure-mcp-tunnel", "process-start-observed", {
+    loaded: status.loaded,
+    running: status.running,
+    ...(status.pid ? { pid: status.pid } : {}),
+  });
+  return status;
 }
 
 async function waitForTunnelServiceUnloaded(timeoutMs = 20_000): Promise<void> {
@@ -260,12 +270,24 @@ export async function stopTunnelService(): Promise<TunnelServiceStatus> {
     runChecked("launchctl", ["bootout", serviceTarget()]);
     await waitForTunnelServiceUnloaded();
   }
-  return getTunnelServiceStatus();
+  const status = getTunnelServiceStatus();
+  recordChatGptProcessEvent("secure-mcp-tunnel", "process-stop-observed", {
+    loaded: status.loaded,
+    running: status.running,
+  });
+  return status;
 }
 
 export async function restartTunnelService(): Promise<TunnelServiceStatus> {
+  recordChatGptProcessEvent("secure-mcp-tunnel", "restart-requested");
   await stopTunnelService();
-  return startTunnelService();
+  const status = startTunnelService();
+  recordChatGptProcessEvent("secure-mcp-tunnel", "restart-completed", {
+    loaded: status.loaded,
+    running: status.running,
+    ...(status.pid ? { pid: status.pid } : {}),
+  });
+  return status;
 }
 
 export async function uninstallTunnelService(): Promise<TunnelServiceStatus> {

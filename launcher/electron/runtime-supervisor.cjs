@@ -849,6 +849,10 @@ class RuntimeSupervisor {
       });
       if (this.tunnelMonitorFailures < TUNNEL_MONITOR_FAILURE_THRESHOLD) return;
       this.lastChildFailure.tunnel = message;
+      this.flightRecorder?.recordProcess("process-gone-observed", {
+        pid: this.tunnel?.pid ?? null,
+        consecutiveFailures: this.tunnelMonitorFailures,
+      }, "secure-mcp-tunnel");
       this.tunnel = null;
       this.stopTunnelMonitor();
       if (!this.tryWriteState("degraded", message)) return;
@@ -881,12 +885,18 @@ class RuntimeSupervisor {
         if (health.ready) {
           this.tunnelMonitorFailures = 0;
           if (this.tunnel?.pid !== health.pid) {
+            const previousPid = this.tunnel?.pid ?? null;
             this.tunnel = {
               pid: health.pid,
               exitCode: null,
               signalCode: null,
               managed: true,
             };
+            this.flightRecorder?.recordProcess(
+              previousPid === null ? "process-start-observed" : "process-restart-observed",
+              { previousPid, pid: health.pid ?? null },
+              "secure-mcp-tunnel",
+            );
             this.tryWriteState("ready");
           }
           return;

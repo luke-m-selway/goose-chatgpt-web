@@ -1,7 +1,7 @@
-import { createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { chatGptWebExecutionIdentity, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import { standaloneRetryCircuit } from "./adapters/chatgpt-web/retry-circuit";
 import { stripVolatileTurnContextParts } from "./adapters/chatgpt-web/environment";
@@ -34,6 +34,68 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import {
+  chatGptFlightRecorder,
+  configureChatGptFlightRecorder,
+  recordChatGptFlightEvent,
+  recordChatGptProcessEvent,
+} from "./observations/flight-recorder";
+
+interface ResponseTransportObservation {
+  traceId: string;
+  requestId: string;
+  startedAt: number;
+  settled?: boolean;
+  onSettled?: () => void;
+  bodyChunkCount?: number;
+  bodyByteCount?: number;
+  lastSuccessfulBodyChunkElapsedMs?: number;
+  cancellationRequested?: boolean;
+}
+
+const responseTransportObservations = new WeakMap<Response, ResponseTransportObservation>();
+
+export function registerResponseTransportObservation(
+  response: Response,
+  context: ResponseTransportObservation,
+): Response {
+  if (chatGptFlightRecorder().config.enabled) responseTransportObservations.set(response, context);
+  return response;
+}
+
+function recordResponseTransport(
+  context: ResponseTransportObservation | undefined,
+  event: "body-normal-close" | "body-error" | "client-cancellation",
+): void {
+  if (!context || context.settled) return;
+  context.settled = true;
+  try { context.onSettled?.(); } catch {}
+  recordChatGptFlightEvent({
+    category: "responses", event, traceId: context.traceId, requestId: context.requestId,
+    finalBodyOutcome: event === "body-normal-close" ? "normal-close" : event,
+    bodyChunkCount: context.bodyChunkCount ?? 0,
+    bodyByteCount: context.bodyByteCount ?? 0,
+    lastSuccessfulBodyChunkElapsedMs: context.lastSuccessfulBodyChunkElapsedMs ?? null,
+    elapsedMs: Date.now() - context.startedAt,
+  });
+}
+
+function recordSuccessfulResponseBodyChunk(
+  context: ResponseTransportObservation | undefined,
+  chunk: Uint8Array,
+): void {
+  if (!context || context.settled) return;
+  context.bodyChunkCount = (context.bodyChunkCount ?? 0) + 1;
+  context.bodyByteCount = (context.bodyByteCount ?? 0) + chunk.byteLength;
+  context.lastSuccessfulBodyChunkElapsedMs = Math.max(0, Date.now() - context.startedAt);
+}
+
+function observedBodyOutcome(
+  context: ResponseTransportObservation | undefined,
+  fallback: "body-normal-close" | "body-error",
+): "body-normal-close" | "body-error" | "client-cancellation" {
+  return context?.cancellationRequested === true ? "client-cancellation" : fallback;
+}
 
 export class HttpTurnCounter {
   private active = 0;
@@ -62,12 +124,18 @@ export class HttpTurnCounter {
 
     try {
       const response = await run();
+      const observation = responseTransportObservations.get(response);
+      responseTransportObservations.delete(response);
       if (!response.body) {
+        recordResponseTransport(observation, "body-normal-close");
         release();
         return response;
       }
       if (signal?.aborted) {
-        void response.body.cancel(signal.reason).catch(() => {});
+        if (observation) observation.cancellationRequested = true;
+        void response.body.cancel(signal.reason).catch(() => {}).finally(() => {
+          recordResponseTransport(observation, "client-cancellation");
+        });
         release();
         return response;
       }
@@ -78,7 +146,11 @@ export class HttpTurnCounter {
         // the original SSE reader without an eagerly drained tee branch racing the socket writer.
         const reader = response.body.getReader();
         abortListener = () => {
-          void reader.cancel(signal?.reason).catch(() => {}).finally(release);
+          if (observation) observation.cancellationRequested = true;
+          void reader.cancel(signal?.reason).catch(() => {}).finally(() => {
+            recordResponseTransport(observation, "client-cancellation");
+            release();
+          });
         };
         signal?.addEventListener("abort", abortListener, { once: true });
         const body = new ReadableStream<Uint8Array>({
@@ -86,20 +158,25 @@ export class HttpTurnCounter {
             try {
               const chunk = await reader.read();
               if (chunk.done) {
+                recordResponseTransport(observation, observedBodyOutcome(observation, "body-normal-close"));
                 release();
                 controller.close();
                 return;
               }
               controller.enqueue(chunk.value);
+              recordSuccessfulResponseBodyChunk(observation, chunk.value);
             } catch (error) {
+              recordResponseTransport(observation, observedBodyOutcome(observation, "body-error"));
               release();
               controller.error(error);
             }
           },
           async cancel(reason) {
+            if (observation) observation.cancellationRequested = true;
             try {
               await reader.cancel(reason);
             } finally {
+              recordResponseTransport(observation, "client-cancellation");
               release();
             }
           },
@@ -118,17 +195,25 @@ export class HttpTurnCounter {
       const [clientBody, lifecycleBody] = response.body.tee();
       const reader = lifecycleBody.getReader();
       abortListener = () => {
-        void reader.cancel(signal?.reason).catch(() => {});
-        void clientBody.cancel(signal?.reason).catch(() => {});
+        if (observation) observation.cancellationRequested = true;
+        void Promise.allSettled([
+          reader.cancel(signal?.reason),
+          clientBody.cancel(signal?.reason),
+        ]).finally(() => recordResponseTransport(observation, "client-cancellation"));
         release();
       };
       signal?.addEventListener("abort", abortListener, { once: true });
       void (async () => {
         try {
-          while (!(await reader.read()).done) {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            recordSuccessfulResponseBodyChunk(observation, chunk.value);
             // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
+          recordResponseTransport(observation, observedBodyOutcome(observation, "body-normal-close"));
         } catch {
+          recordResponseTransport(observation, observedBodyOutcome(observation, "body-error"));
           // Stream failure is delivered to the client branch; lifecycle cleanup stays best-effort.
         } finally {
           release();
@@ -245,11 +330,13 @@ function standaloneAssistantTextContent(value: unknown): boolean {
  * requires Codex's own turn/thread metadata and fails closed for a plain Goose request).
  *
  * Identity defaults to a deterministic digest of the input prefix ending at the latest user
- * message, not a fresh random value. Because Goose resends full history, a byte-identical retry of
- * the same logical turn — or a duplicate HTTP POST from a client-side retry — collapses onto the
- * same execution key instead of opening a second browser tab for work that is already in flight or
- * already answered. A genuinely new user message changes the prefix and therefore always gets a
- * fresh identity, i.e. a fresh browser turn.
+ * message, not a fresh random value. When a trusted Goose session namespace is available, that
+ * existing content digest is namespaced by the session before becoming the synthetic turn ID, so
+ * fresh Goose sessions cannot collide merely because they sent identical content. Without a
+ * namespace, the historical content-only digest is retained for compatibility. Because Goose
+ * resends full history, a byte-identical retry of the same logical turn — or a duplicate HTTP POST
+ * from a client-side retry — still collapses onto the same execution key. A genuinely new user
+ * message changes the prefix and therefore gets a fresh identity, i.e. a fresh browser turn.
  */
 /**
  * Tag the input item at `latestUserIndex` with deterministic synthetic thread/turn identity so the
@@ -279,11 +366,22 @@ function tagStandaloneIdentity(
   input: unknown[],
   latestUserIndex: number,
   identity: string | undefined,
+  identityNamespace: string | undefined,
 ): unknown {
-  const resolvedIdentity = identity ?? createHash("sha256")
-    .update(JSON.stringify(standaloneIdentityPrefix(input, latestUserIndex)))
-    .digest("hex")
-    .slice(0, 32);
+  const resolvedIdentity = identity ?? (() => {
+    const contentIdentity = createHash("sha256")
+      .update(JSON.stringify(standaloneIdentityPrefix(input, latestUserIndex)))
+      .digest("hex")
+      .slice(0, 32);
+    return identityNamespace === undefined
+      ? contentIdentity
+      : createHash("sha256")
+        .update(identityNamespace)
+        .update("\0")
+        .update(contentIdentity)
+        .digest("hex")
+        .slice(0, 32);
+  })();
   const turnId = `standalone_${resolvedIdentity}`;
   const taggedInput = input.map((item, index) => index === latestUserIndex ? {
     ...plainObject(item),
@@ -307,6 +405,7 @@ export function prepareStandaloneTextRequest(
   raw: unknown,
   config: AppConfig,
   identity?: string,
+  identityNamespace?: string,
 ): unknown {
   if (!config.standalone || config.mode !== "browser-only") return raw;
   const body = plainObject(raw);
@@ -334,7 +433,7 @@ export function prepareStandaloneTextRequest(
     if (item.role === "user") latestUserIndex = index;
   }
   if (latestUserIndex < 0) return raw;
-  return tagStandaloneIdentity(body, input, latestUserIndex, identity);
+  return tagStandaloneIdentity(body, input, latestUserIndex, identity, identityNamespace);
 }
 
 function standaloneAllowedToolItem(item: Record<string, unknown>): boolean {
@@ -357,6 +456,7 @@ export function prepareStandaloneToolRequest(
   raw: unknown,
   config: AppConfig,
   identity?: string,
+  identityNamespace?: string,
 ): unknown {
   if (!config.standalone || config.mode !== "full") return raw;
   const body = plainObject(raw);
@@ -385,7 +485,7 @@ export function prepareStandaloneToolRequest(
     if (item.role === "user") latestUserIndex = index;
   }
   if (latestUserIndex < 0) return raw;
-  return tagStandaloneIdentity(body, input, latestUserIndex, identity);
+  return tagStandaloneIdentity(body, input, latestUserIndex, identity, identityNamespace);
 }
 
 export async function responseRequest(
@@ -417,8 +517,14 @@ export async function responseRequest(
   const requestedPreviousResponseId = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
+  const trustedAgentSessionId = req.headers.get("agent-session-id")?.trim() || undefined;
   const stockGooseCompaction = config.standalone === true && isStockGooseCompactionRequestBody(raw);
-  const standalonePrepared = prepareStandaloneToolRequest(prepareStandaloneTextRequest(raw, config), config);
+  const standalonePrepared = prepareStandaloneToolRequest(
+    prepareStandaloneTextRequest(raw, config, undefined, trustedAgentSessionId),
+    config,
+    undefined,
+    trustedAgentSessionId,
+  );
   const expanded = expandPreviousResponseInput(standalonePrepared);
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
@@ -451,15 +557,92 @@ export async function responseRequest(
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
   }
 
-  const adapter = adapterFactory(providerConfig(config));
+  const provider = providerConfig(config);
+  const adapter = adapterFactory(provider);
+  const requestId = randomUUID();
+  let identity: ReturnType<typeof chatGptWebExecutionIdentity>;
+  try {
+    identity = chatGptWebExecutionIdentity(provider, parsed);
+  } catch {
+    // Identity validation still belongs to the adapter and retains its existing Responses error
+    // path. A malformed request gets a request-local observation trace without changing behavior.
+    const fallback = createHash("sha256").update(requestId).digest("hex");
+    identity = { executionKey: `unbound:${fallback}`, executionKeyHash: fallback, traceId: fallback.slice(0, 12) };
+  }
+  const requestStartedAt = Date.now();
+  recordChatGptFlightEvent({
+    category: "request",
+    event: "request-accepted",
+    traceId: identity.traceId,
+    requestId,
+    executionKeyHash: identity.executionKeyHash,
+    ...(trustedAgentSessionId ? { agentSessionId: trustedAgentSessionId } : {}),
+    model: route.slug,
+    effort: parsed.options.reasoning ?? "default",
+    stream: parsed.stream,
+    daemonPid: process.pid,
+    activeBrowserTurns: chatGptTurnSessions.activeCount(),
+  });
+  recordChatGptFlightEvent({
+    category: "responses", event: "responses-request-start", traceId: identity.traceId,
+    requestId, stream: parsed.stream,
+  });
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
-  if (req.signal.aborted) abort.abort();
-  else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  let adapterOutcomeRecorded = false;
+  let adapterCancellationRecorded = false;
+  const recordAdapterCancellation = (source: string) => {
+    if (adapterCancellationRecorded) return;
+    adapterCancellationRecorded = true;
+    recordChatGptFlightEvent({
+      category: "responses", event: "adapter-cancellation", traceId: identity.traceId, requestId,
+      cancellationSource: source,
+      elapsedMs: Date.now() - requestStartedAt,
+    });
+  };
+  const onRequestAbort = () => {
+    recordChatGptFlightEvent({
+      category: "responses", event: "request-signal-abort", traceId: identity.traceId,
+      requestId, elapsedMs: Date.now() - requestStartedAt,
+    });
+    recordAdapterCancellation("request-signal");
+    abort.abort(req.signal.reason);
+  };
+  if (req.signal.aborted) onRequestAbort();
+  else req.signal.addEventListener("abort", onRequestAbort, { once: true });
+  const recordAdapterOutcome = (event: AdapterEvent) => {
+    if (adapterOutcomeRecorded || !["done", "error", "incomplete"].includes(event.type)) return;
+    adapterOutcomeRecorded = true;
+    recordChatGptFlightEvent({
+      category: "responses", event: "adapter-outcome", traceId: identity.traceId, requestId,
+      outcome: event.type,
+      ...(event.type === "error" ? {
+        errorClassification: event.code ?? event.errorType ?? "unclassified",
+        retryable: event.retryable ?? false,
+      } : {}),
+      elapsedMs: Date.now() - requestStartedAt,
+    });
+  };
   const run = async () => {
     try {
-      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => queue.push(event));
+      await adapter.runTurn!(parsed, {
+        headers: req.headers,
+        abortSignal: abort.signal,
+        flightRequestId: requestId,
+      }, event => {
+        recordAdapterOutcome(event);
+        queue.push(event);
+      });
     } catch (error) {
+      if (!adapterOutcomeRecorded) {
+        adapterOutcomeRecorded = true;
+        recordChatGptFlightEvent({
+          category: "responses", event: "adapter-outcome", traceId: identity.traceId, requestId,
+          outcome: error instanceof DOMException && error.name === "AbortError" ? "cancelled" : "threw",
+          errorClassification: error instanceof Error ? error.name : "unknown",
+          elapsedMs: Date.now() - requestStartedAt,
+        });
+      }
       queue.push({ type: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       queue.close();
@@ -476,22 +659,57 @@ export async function responseRequest(
       maps.toolNsMap,
       maps.freeformToolNames,
       maps.toolSearchToolNames,
-      () => abort.abort(),
+      reason => {
+        if (reason !== "terminal") recordAdapterCancellation(reason ?? "unknown");
+        abort.abort();
+      },
       2_000,
       {
         hideThinkingSummary: parsed.options.hideThinkingSummary,
+        onFirstFrame: () => recordChatGptFlightEvent({
+          category: "responses", event: "first-sse-frame", traceId: identity.traceId, requestId,
+          elapsedMs: Date.now() - requestStartedAt,
+        }),
+        onTerminal: status => recordChatGptFlightEvent({
+          category: "responses", event: `response.${status}`, traceId: identity.traceId, requestId,
+          elapsedMs: Date.now() - requestStartedAt,
+        }),
+        onDone: () => recordChatGptFlightEvent({
+          category: "responses", event: "done-enqueued", traceId: identity.traceId, requestId,
+          elapsedMs: Date.now() - requestStartedAt,
+        }),
+        onActivitySettled: activity => recordChatGptFlightEvent({
+          category: "responses",
+          event: "sse-activity-settled",
+          traceId: identity.traceId,
+          requestId,
+          sseFrameCount: activity.frameCount,
+          sseByteCount: activity.byteCount,
+          heartbeatFrameCount: activity.heartbeatFrameCount,
+          lastSuccessfulEnqueueElapsedMs: activity.lastSuccessfulEnqueueElapsedMs,
+          terminalEventEnqueued: activity.terminalEventEnqueued,
+          doneEnqueued: activity.doneEnqueued,
+          sseSettlement: activity.settlement,
+          sseElapsedMs: activity.elapsedMs,
+          elapsedMs: Date.now() - requestStartedAt,
+        }),
         ...(compaction ? { compaction: true } : {
           onCompletedResponse: (response: Record<string, unknown>) => rememberResponseState(parsed._rawBody, response, { force: true }),
         }),
       },
     );
-    return new Response(stream, {
+    return registerResponseTransportObservation(new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
       },
+    }), {
+      traceId: identity.traceId,
+      requestId,
+      startedAt: requestStartedAt,
+      onSettled: () => req.signal.removeEventListener("abort", onRequestAbort),
     });
   }
 
@@ -505,7 +723,19 @@ export async function responseRequest(
     ...(compaction ? { compaction: true } : {}),
   });
   if (!compaction) rememberResponseState(parsed._rawBody, json, { force: true });
-  return Response.json(json);
+  const status = typeof json === "object" && json && "status" in json ? String(json.status) : "unknown";
+  if (["completed", "failed", "incomplete"].includes(status)) {
+    recordChatGptFlightEvent({
+      category: "responses", event: `response.${status}`, traceId: identity.traceId, requestId,
+      elapsedMs: Date.now() - requestStartedAt,
+    });
+  }
+  return registerResponseTransportObservation(Response.json(json), {
+    traceId: identity.traceId,
+    requestId,
+    startedAt: requestStartedAt,
+    onSettled: () => req.signal.removeEventListener("abort", onRequestAbort),
+  });
 }
 
 export async function compactRequest(
@@ -612,6 +842,11 @@ export function startServer(
   config: AppConfig,
   dependencies: { fetchUpstream?: NativeFetch } = {},
 ): ReturnType<typeof Bun.serve> {
+  configureChatGptFlightRecorder(
+    config.observation,
+    config.browserHost === "launcher" ? config.browserHostDescriptorPath : undefined,
+  );
+  recordChatGptProcessEvent("responses-daemon", "process-started", { pid: process.pid });
   const startedAt = Date.now();
   if (config.mode === "full") {
     void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {

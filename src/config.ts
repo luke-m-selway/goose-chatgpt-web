@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import type { CodexProviderConfig } from "./types";
+import { validateFlightRecorderConfig, type FlightRecorderConfig } from "./observations/flight-recorder";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -71,6 +72,8 @@ export interface AppConfig {
   headed: boolean;
   proAvailable: boolean;
   autoApproveToolCalls: boolean;
+  /** Passive local-only ChatGPT-Web telemetry. It has no authority over turn decisions. */
+  observation?: FlightRecorderConfig;
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
@@ -162,6 +165,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     headed: true,
     proAvailable: false,
     autoApproveToolCalls: false,
+    observation: { enabled: false },
     controlToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
   };
@@ -378,10 +382,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
+  const observation = validateFlightRecorderConfig(parsed.observation, path);
   return {
     ...parsed,
     standalone: parsed.standalone === true,
     proAvailable: parsed.proAvailable === true,
+    ...(observation ? { observation } : {}),
   } as AppConfig;
 }
 

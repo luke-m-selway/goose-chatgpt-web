@@ -34,9 +34,30 @@ Electron owns BrowserHost only. It does **not** own the Responses daemon or the 
 
 ## Qualified runtime checkpoint
 
-Status as of 2026-08-12: **current/proven**, with one explicitly unrun autostart proof.
+Status as of 2026-08-14: **current/proven**, with explicitly named remaining reliability and autostart gaps.
 
 The known-good Electron checkpoint is `c624274` (`Checkpoint proven Electron lifecycle and Goose inference`). Current `main` then adds `dd44b74` (`Add ordered macOS autostart coordinator`).
+
+Separately, draft PR #31's development runtime is deployed at
+`7f99f187295135de1507c3fcd63aca08e9c01810` (`fix: isolate browser diagnostics from critical stages`).
+Its native liveness design/review has passed, ordinary multi-turn ChatGPT-Web use and native delegation
+are established, a genuine parent plus two async ChatGPT-Web child topology and genuine three-surface
+overlap have been observed, and passive flight recording is enabled for ordinary use. Reliable
+parent-plus-two-child completion remains **NOT QUALIFIED**; the deployed development revision does not
+replace the proven `c624274`/`dd44b74` lifecycle/autostart baseline.
+
+A natural Day Shift workload exposed a Playwright/CDP control-stall path in which a timed-out diagnostic
+could remain outstanding and overlap a later critical browser stage while Electron-native screenshots
+showed the ChatGPT page itself remained alive and authenticated. `7f99f187...` removes routine launcher
+Playwright diagnostics from the critical path, prevents stale same-trace diagnostics from overlapping a
+new critical stage, preserves real `composer_ready` errors instead of broadly rewriting them as login
+expiry, and adds bounded composer/control telemetry. The first ordinary retry of the workload that
+exposed the issue appeared to proceed normally after activation. This is encouraging ecological
+evidence, not a new formal qualification verdict.
+
+See [`docs/chatgpt-web-reliability-closeout.md`](docs/chatgpt-web-reliability-closeout.md) for the current
+reliability checkpoint, incident evidence, repair, activation proof, operating envelope, and remaining
+unknowns.
 
 The canonical lifecycle is:
 
@@ -73,24 +94,28 @@ codex-chatgpt-web autostart <status|install|trigger|disable>
 
 Those literal names are inherited implementation identifiers; they do not change the Goose-first ownership model above.
 
-## Next active milestone — Goose Control
+## Passive reliability closeout and next feature milestone
 
-Goose Control is now the next active project milestone. It is a Planner-to-Goose management path and is separate from both Electron BrowserHost identity and Goose Native's per-turn `turn_token` authority.
+The current reliability phase uses the in-process passive flight recorder to collect correlated
+browser, Responses transport, broker, navigation, network-failure, and Electron-native screenshot
+evidence during ordinary single-agent and naturally delegated ChatGPT-Web work. Designated synthetic
+qualification is paused in favor of that ecological evidence.
 
-The settled backend is authenticated loopback `goose serve` ACP. The first practical Planner-facing proof is intentionally small:
+Use ChatGPT-Web normally rather than defensively: multi-turn parent sessions, ordinary Goose Native tool
+use, and meaningful bounded milestones are expected. When another strong ChatGPT-Web agent genuinely
+adds value, the current practical recommendation is parent + at most **one ChatGPT-Web child at a time**,
+for example for diff review or adversarial review. Parent + two simultaneous ChatGPT-Web children has
+been formed and overlapped, but reliable three-way completion is not yet qualified.
 
-```text
-ChatGPT Planner
-  → private custom GPT in the existing web conversation
-  → GPT Action
-  → narrow authenticated HTTPS REST/OpenAPI Goose Control facade
-  → authenticated loopback Goose ACP
-  → one hard-approved persisted Goose session
-```
+See [`docs/chatgpt-web-reliability-closeout.md`](docs/chatgpt-web-reliability-closeout.md) and
+[`docs/chatgpt-web-flight-recorder.md`](docs/chatgpt-web-flight-recorder.md). The older
+[`docs/chatgpt-web-concurrency-qualification.md`](docs/chatgpt-web-concurrency-qualification.md) is
+retained qualification procedure/evidence; use the closeout document for the current deployed status.
 
-The first proof is continuation-only and synchronous/bounded: one idempotent `submit_turn` request with mandatory `request_id`, returning only the final user-visible Goose result. Async jobs, cancellation, multiple targets, fresh sessions, and Orchestrator/Palmate remain later phases.
-
-See [`docs/goose-control-plan.md`](docs/goose-control-plan.md).
+Goose Control work has resumed in the separate Day Shift repository. It is a Planner-to-Goose
+management path and is separate from both Electron BrowserHost identity and Goose Native's per-turn
+`turn_token` authority. Do not add ChatGPT-Web-specific recovery or orchestration machinery to Goose
+Control.
 
 ## Documentation
 
@@ -98,12 +123,17 @@ Start with [`docs/README.md`](docs/README.md). It classifies current, active, de
 
 - [`docs/architecture.md`](docs/architecture.md) — current ownership and request/tool flow.
 - [`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md) — canonical lifecycle, BrowserHost readiness, autostart status, and proof boundaries.
-- [`docs/goose-control-plan.md`](docs/goose-control-plan.md) — next active Goose Control milestone.
+- [`docs/chatgpt-web-reliability-closeout.md`](docs/chatgpt-web-reliability-closeout.md) — authoritative current reliability checkpoint and operating envelope.
+- [`docs/chatgpt-web-flight-recorder.md`](docs/chatgpt-web-flight-recorder.md) — active passive observation for ordinary ChatGPT-Web use.
+- [`docs/chatgpt-web-concurrency-qualification.md`](docs/chatgpt-web-concurrency-qualification.md) — retained liveness/concurrency qualification procedure and earlier evidence.
+- [`docs/goose-control-plan.md`](docs/goose-control-plan.md) — historical/planning context for the separate Day Shift Goose Control workstream; implementation belongs in `luke-m-selway/day-shift`.
 - [`docs/roadmap.md`](docs/roadmap.md) — current and next work only.
 - [`docs/security-model.md`](docs/security-model.md) — trust and capability boundaries.
 - [`AGENTS.md`](AGENTS.md) — mandatory rules for coding/automation agents.
 
 ## Development
+
+Development requires Bun 1.3.14.
 
 This repository currently uses Bun for the TypeScript/runtime toolchain and Electron/Node semantics for the BrowserHost helper. Before merging runtime changes, use the repository's normal verification suite:
 

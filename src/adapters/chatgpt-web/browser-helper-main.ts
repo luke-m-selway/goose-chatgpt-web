@@ -6,6 +6,7 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import type { CompiledChatGptWebPrompt } from "./prompt";
+import { recordChatGptProcessEvent } from "../../observations/flight-recorder";
 
 interface RunMessage {
   type: "run";
@@ -263,3 +264,4 @@ process.once("SIGTERM", () => {
 });
 
 writeProtocol({ type: "ready" });
+recordChatGptProcessEvent("browser-helper", "process-started", { pid: process.pid });

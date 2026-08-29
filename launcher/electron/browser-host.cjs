@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomBytes } = require("node:crypto");
-const { WebContentsView, shell } = require("electron");
+const { createHash, randomBytes } = require("node:crypto");
+const { WebContentsView, net, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -33,6 +33,20 @@ const MAX_LOGIN_ORIGINS = 128;
 const MAX_LOGIN_LOCAL_STORAGE_ENTRIES = 4_096;
 const MAX_LOGIN_STATE_STRING_CHARS = 2 * 1024 * 1024;
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
+const CHATGPT_NETWORK_FAILURE_FILTER = Object.freeze({
+  urls: Object.freeze([
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "wss://chatgpt.com/*",
+    "wss://*.chatgpt.com/*",
+    "https://openai.com/*",
+    "https://*.openai.com/*",
+    "wss://openai.com/*",
+    "wss://*.openai.com/*",
+  ]),
+});
+const CHATGPT_NETWORK_ERROR_MAX_CHARS = 160;
+const chatGptNetworkFailureBindings = new WeakMap();
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
 const COMPOSER_SELECTOR = [
@@ -108,6 +122,61 @@ function isTemporaryChatUrl(value) {
   return parsed.origin === CHATGPT_ORIGIN
     && parsed.pathname === "/"
     && parsed.searchParams.get("temporary-chat") === "true";
+}
+
+function privacySafeNavigationIdentity(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return {
+      isChatGptOrigin: false,
+      isTemporaryChat: false,
+      urlPathHash: createHash("sha256").update("invalid-url").digest("hex").slice(0, 32),
+    };
+  }
+  return {
+    isChatGptOrigin: parsed.origin === CHATGPT_ORIGIN,
+    isTemporaryChat: isTemporaryChatUrl(value),
+    // Deliberately excludes query values and fragments while retaining stable path identity.
+    urlPathHash: createHash("sha256").update(`${parsed.origin}${parsed.pathname}`).digest("hex").slice(0, 32),
+  };
+}
+
+function privacySafeNetworkRequestIdentity(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "wss:") return null;
+  const hostname = parsed.hostname.toLowerCase();
+  let originClassification;
+  if (hostname === "chatgpt.com") originClassification = "chatgpt-primary";
+  else if (hostname.endsWith(".chatgpt.com")) originClassification = "chatgpt-subdomain";
+  else if (hostname === "openai.com") originClassification = "openai-primary";
+  else if (hostname.endsWith(".openai.com")) originClassification = "openai-subdomain";
+  else return null;
+  return {
+    originClassification,
+    // Deliberately excludes query values and fragments while distinguishing network paths.
+    urlPathHash: createHash("sha256")
+      .update(`${parsed.protocol}//${hostname}${parsed.pathname}`)
+      .digest("hex")
+      .slice(0, 32),
+  };
+}
+
+function boundedChromiumNetworkError(value) {
+  const normalized = (typeof value === "string" ? value : "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, CHATGPT_NETWORK_ERROR_MAX_CHARS) || "unknown";
+  return {
+    chromiumErrorCode: normalized.match(/\bERR_[A-Z0-9_]+\b/)?.[0]?.slice(0, 64) || "UNKNOWN",
+    chromiumErrorDescription: normalized,
+  };
 }
 
 function isSessionRefreshRedirectAbort(error) {
@@ -253,7 +322,7 @@ function appendFailure(primary, label, secondary) {
 }
 
 class BrowserHost {
-  constructor({ window, descriptorPath, cdpPort, control, helper, logger, loginWithSystemBrowser, publishState }) {
+  constructor({ window, descriptorPath, cdpPort, control, helper, logger, loginWithSystemBrowser, publishState, flightRecorder }) {
     if (typeof loginWithSystemBrowser !== "function") {
       throw new Error("Browser host system-browser login operation is unavailable");
     }
@@ -265,6 +334,7 @@ class BrowserHost {
     this.logger = logger;
     this.loginWithSystemBrowser = loginWithSystemBrowser;
     this.publishState = publishState;
+    this.flightRecorder = flightRecorder;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -272,6 +342,7 @@ class BrowserHost {
     this.surfaceActive = true;
     this.turnTabs = new Map();
     this.closedTurnOwners = new Map();
+    this.closedTurnLifecycles = new Map();
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
@@ -324,6 +395,7 @@ class BrowserHost {
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);
     this.bindChatGptBackendRecovery();
+    this.bindChatGptNetworkFailureObservation();
     this.bindWebContents();
     void this.view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
       this.logger.error("browser.initialization_failed", { message: error instanceof Error ? error.message : String(error) });
@@ -393,12 +465,41 @@ class BrowserHost {
       bootstrapReady: false,
       bootstrapDeadlineAt: Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
       lastHeartbeatAt: Date.now(),
+      rendererPid: this.readRendererPid(view.webContents),
+      rendererLifecycleStatus: "active",
+      rendererLifecycleEvent: "created",
+      rendererLifecycleRevision: 0,
+      rendererLifecycleReason: undefined,
+      navigationLifecycle: {
+        loadSequence: 0,
+        bootstrapComplete: false,
+        activeLoad: null,
+      },
     };
     this.turnTabs.set(id, tab);
     this.window.contentView.addChildView(view);
     view.setBounds(this.bounds);
     view.setVisible(false);
     this.bindTurnContents(tab);
+    this.flightRecorder?.startSurface({
+      traceId: tab.traceId,
+      surfaceId: tab.surfaceId,
+      rendererPid: tab.rendererPid,
+      webContents: view.webContents,
+      getActiveBrowserTurns: () => [...this.turnTabs.values()].filter(candidate => candidate.status === "running").length,
+    });
+    this.flightRecorder?.record(tab.traceId, "browser-tab-created", {
+      surfaceId: tab.surfaceId,
+      rendererPid: tab.rendererPid,
+      browserHostPid: process.pid,
+      helperPid: tab.helperPid,
+      activeBrowserTurns: this.turnTabs.size,
+    });
+    this.flightRecorder?.record(tab.traceId, "process-identity", {
+      browserHostPid: process.pid,
+      helperPid: tab.helperPid,
+      rendererPid: tab.rendererPid,
+    });
     void view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("browser.tab_initialization_failed", {
@@ -406,13 +507,18 @@ class BrowserHost {
         traceId: tab.traceId,
         message,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "initial-load-failed");
     });
     return tab;
   }
 
   bindTurnContents(tab) {
     const contents = tab.view.webContents;
+    const navigation = tab.navigationLifecycle ??= {
+      loadSequence: 0,
+      bootstrapComplete: false,
+      activeLoad: null,
+    };
     contents.setWindowOpenHandler(({ url }) => {
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
@@ -421,16 +527,61 @@ class BrowserHost {
     });
     contents.on("did-start-loading", () => {
       tab.loading = true;
+      navigation.loadSequence += 1;
+      const navigationKind = navigation.bootstrapComplete
+        ? "full-document-navigation-or-reload"
+        : "initial-bootstrap";
+      const unexpectedNavigation = navigation.bootstrapComplete;
+      navigation.activeLoad = {
+        sequence: navigation.loadSequence,
+        navigationKind,
+        unexpectedNavigation,
+      };
+      this.recordTurnNavigation(tab, "browser-navigation-load-started", contents.getURL(), {
+        navigationKind,
+        loadSequence: navigation.loadSequence,
+        unexpectedNavigation,
+        pin: unexpectedNavigation,
+      });
       this.publishState?.(this.snapshot());
     });
     contents.on("did-stop-loading", () => {
       tab.loading = false;
       tab.url = contents.getURL();
+      const activeLoad = navigation.activeLoad;
+      this.recordTurnNavigation(tab, "browser-navigation-load-stopped", tab.url, {
+        navigationKind: activeLoad?.navigationKind ?? (navigation.bootstrapComplete
+          ? "full-document-navigation-or-reload"
+          : "initial-bootstrap"),
+        loadSequence: activeLoad?.sequence ?? navigation.loadSequence,
+        unexpectedNavigation: activeLoad?.unexpectedNavigation === true,
+      });
+      navigation.activeLoad = null;
       this.publishState?.(this.snapshot());
     });
     contents.on("did-finish-load", () => {
+      this.refreshRendererPid(tab);
       tab.url = contents.getURL();
       tab.loading = false;
+      const identity = privacySafeNavigationIdentity(tab.url);
+      const activeLoad = navigation.activeLoad;
+      let unexpectedNavigation = activeLoad?.unexpectedNavigation === true;
+      if (!navigation.bootstrapComplete && identity.isTemporaryChat) {
+        navigation.bootstrapComplete = true;
+        unexpectedNavigation = false;
+      } else if (!navigation.bootstrapComplete
+        && navigation.loadSequence > 1
+        && tab.url !== IDLE_BROWSER_URL) {
+        unexpectedNavigation = true;
+      }
+      this.recordTurnNavigation(tab, "browser-navigation-load-finished", tab.url, {
+        navigationKind: activeLoad?.navigationKind ?? (navigation.bootstrapComplete
+          ? "full-document-navigation-or-reload"
+          : "initial-bootstrap"),
+        loadSequence: activeLoad?.sequence ?? navigation.loadSequence,
+        unexpectedNavigation,
+        pin: unexpectedNavigation && activeLoad?.unexpectedNavigation !== true,
+      });
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
       void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
       const encoded = JSON.stringify(tab.surfaceId);
@@ -453,7 +604,18 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) tab.url = url;
+      if (mainFrame) {
+        tab.url = url;
+        const identity = privacySafeNavigationIdentity(url);
+        const wasBootstrapped = navigation.bootstrapComplete;
+        if (!navigation.bootstrapComplete && identity.isTemporaryChat) navigation.bootstrapComplete = true;
+        this.recordTurnNavigation(tab, "browser-navigation-in-page", url, {
+          navigationKind: wasBootstrapped ? "same-document-navigation" : "initial-bootstrap",
+          loadSequence: navigation.loadSequence,
+          unexpectedNavigation: wasBootstrapped,
+          pin: wasBootstrapped,
+        });
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
@@ -467,18 +629,144 @@ class BrowserHost {
         errorDescription,
         url,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "navigation-failed");
     });
     contents.on("render-process-gone", (_event, details) => {
+      this.updateTurnLifecycle(tab, "gone", "render-process-gone", details.reason);
       tab.message = `Browser renderer stopped: ${details.reason}`;
       this.logger.error("browser.tab_renderer_gone", {
         tabId: tab.id,
         traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
         reason: details.reason,
         exitCode: details.exitCode,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, "render-process-gone");
     });
+    contents.on("unresponsive", () => {
+      if (!this.turnTabs.has(tab.id)) return;
+      this.updateTurnLifecycle(tab, "unresponsive", "unresponsive");
+      this.flightRecorder?.observe(tab.traceId, "renderer-unresponsive");
+      this.logger.warn("browser.tab_renderer_unresponsive", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
+      });
+      this.publishState?.(this.snapshot());
+    });
+    contents.on("responsive", () => {
+      if (!this.turnTabs.has(tab.id)) return;
+      this.updateTurnLifecycle(tab, "active", "responsive");
+      this.logger.info("browser.tab_renderer_responsive", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
+      });
+      this.publishState?.(this.snapshot());
+    });
+    contents.on("destroyed", () => {
+      if (!this.turnTabs.has(tab.id)) {
+        if (this.closedTurnOwners.get(tab.traceId) === tab.helperPid
+          && tab.rendererLifecycleStatus !== "gone"
+          && tab.rendererLifecycleStatus !== "destroyed") {
+          this.updateTurnLifecycle(tab, "destroyed", "destroyed");
+          this.closedTurnLifecycles?.set(tab.traceId, this.turnLifecycleSnapshot(tab));
+        }
+        return;
+      }
+      this.updateTurnLifecycle(tab, "destroyed", "destroyed");
+      this.logger.error("browser.tab_web_contents_destroyed", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        surfaceId: tab.surfaceId,
+        rendererPid: tab.rendererPid,
+        lifecycleRevision: tab.rendererLifecycleRevision,
+      });
+      this.removeTurnTab(tab, true, "web-contents-destroyed");
+    });
+  }
+
+  readRendererPid(contents) {
+    if (!contents || contents.isDestroyed?.()) return null;
+    try {
+      const rendererPid = contents.getOSProcessId();
+      return Number.isInteger(rendererPid) && rendererPid > 0 ? rendererPid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  refreshRendererPid(tab) {
+    const rendererPid = this.readRendererPid(tab.view?.webContents);
+    if (rendererPid) tab.rendererPid = rendererPid;
+    return tab.rendererPid ?? null;
+  }
+
+  readNetworkOnlineState() {
+    return typeof net?.isOnline === "function" ? net.isOnline() : null;
+  }
+
+  recordTurnNavigation(tab, event, url, options = {}) {
+    try {
+      const identity = privacySafeNavigationIdentity(url);
+      const rendererPid = this.refreshRendererPid(tab);
+      this.flightRecorder?.updateSurface(tab.surfaceId, { rendererPid });
+      this.flightRecorder?.record(tab.traceId, event, {
+        navigationKind: options.navigationKind || "unknown",
+        loadSequence: Number.isSafeInteger(options.loadSequence) ? options.loadSequence : 0,
+        unexpectedNavigation: options.unexpectedNavigation === true,
+        rendererPid,
+        ...identity,
+      });
+      if (options.pin === true) {
+        const pin = this.flightRecorder?.observe(tab.traceId, event);
+        if (pin && typeof pin.catch === "function") void pin.catch(() => {});
+      }
+    } catch {
+      // Navigation observation is passive and must never affect WebContents lifecycle handling.
+    }
+  }
+
+  updateTurnLifecycle(tab, status, event, reason) {
+    this.refreshRendererPid(tab);
+    tab.rendererLifecycleStatus = status;
+    tab.rendererLifecycleEvent = event;
+    tab.rendererLifecycleRevision = (tab.rendererLifecycleRevision ?? 0) + 1;
+    tab.rendererLifecycleReason = typeof reason === "string" && reason ? reason : undefined;
+    this.flightRecorder?.updateSurface(tab.surfaceId, { rendererPid: tab.rendererPid });
+    this.flightRecorder?.record(tab.traceId, `browser-lifecycle-${event}`, {
+      status,
+      rendererPid: tab.rendererPid,
+      revision: tab.rendererLifecycleRevision,
+      ...(tab.rendererLifecycleReason ? { reason: tab.rendererLifecycleReason } : {}),
+    });
+    if (["gone", "destroyed"].includes(status)) this.flightRecorder?.observe(tab.traceId, `renderer-${status}`);
+  }
+
+  turnLifecycleSnapshot(tab) {
+    const contents = tab.view?.webContents;
+    if (tab.rendererLifecycleStatus !== "gone"
+      && tab.rendererLifecycleStatus !== "destroyed"
+      && contents?.isDestroyed?.()) {
+      this.updateTurnLifecycle(tab, "destroyed", "destroyed");
+    } else {
+      this.refreshRendererPid(tab);
+    }
+    return {
+      traceId: tab.traceId,
+      surfaceId: tab.surfaceId,
+      rendererPid: tab.rendererPid ?? null,
+      status: tab.rendererLifecycleStatus ?? "active",
+      event: tab.rendererLifecycleEvent ?? "created",
+      revision: tab.rendererLifecycleRevision ?? 0,
+      ...(tab.rendererLifecycleReason ? { reason: tab.rendererLifecycleReason } : {}),
+    };
   }
 
   bindWebContents() {
@@ -632,6 +920,73 @@ class BrowserHost {
     );
   }
 
+  bindChatGptNetworkFailureObservation() {
+    try {
+      const browserSession = this.view?.webContents?.session;
+      if (!browserSession?.webRequest?.onErrorOccurred) return false;
+      const existing = chatGptNetworkFailureBindings.get(browserSession);
+      if (existing) {
+        existing.host = this;
+        return false;
+      }
+      const binding = { host: this };
+      browserSession.webRequest.onErrorOccurred(
+        CHATGPT_NETWORK_FAILURE_FILTER,
+        details => {
+          try { binding.host?.handleChatGptNetworkRequestFailure(details); } catch {}
+        },
+      );
+      chatGptNetworkFailureBindings.set(browserSession, binding);
+      return true;
+    } catch {
+      // Network observation is passive and must never affect BrowserHost construction.
+      return false;
+    }
+  }
+
+  handleChatGptNetworkRequestFailure(details) {
+    let identity;
+    try { identity = privacySafeNetworkRequestIdentity(details?.url); } catch { return false; }
+    if (!identity || !Number.isInteger(details?.webContentsId)) return false;
+    const tab = [...this.turnTabs.values()].find(candidate => (
+      candidate.status === "running"
+      && candidate.view?.webContents?.id === details.webContentsId
+      && !candidate.view.webContents.isDestroyed?.()
+    ));
+    if (!tab) return false;
+
+    const activeBrowserTurns = [...this.turnTabs.values()]
+      .filter(candidate => candidate.status === "running").length;
+    let rendererPid = tab.rendererPid ?? null;
+    try { rendererPid = this.refreshRendererPid(tab); } catch {}
+    let netIsOnline = null;
+    try { netIsOnline = this.readNetworkOnlineState(); } catch {}
+    const error = boundedChromiumNetworkError(details.error);
+    const detail = {
+      surfaceId: tab.surfaceId,
+      rendererPid,
+      webContentsId: details.webContentsId,
+      networkRequestId: Number.isSafeInteger(details.id) ? details.id : null,
+      resourceType: typeof details.resourceType === "string"
+        ? details.resourceType.slice(0, 32)
+        : "other",
+      requestMethod: typeof details.method === "string"
+        ? details.method.replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 16) || "UNKNOWN"
+        : "UNKNOWN",
+      ...error,
+      ...identity,
+      netIsOnline: typeof netIsOnline === "boolean" ? netIsOnline : null,
+      activeBrowserTurns,
+    };
+    try { this.flightRecorder?.updateSurface(tab.surfaceId, { rendererPid }); } catch {}
+    try { this.flightRecorder?.record(tab.traceId, "browser-network-request-failed", detail); } catch {}
+    try {
+      const pin = this.flightRecorder?.observe(tab.traceId, "browser-network-request-failed");
+      if (pin && typeof pin.catch === "function") void pin.catch(() => {});
+    } catch {}
+    return true;
+  }
+
   handleChatGptBackendResponse(details) {
     const contents = this.view?.webContents;
     if (!contents || contents.isDestroyed() || details?.webContentsId !== contents.id) return false;
@@ -751,6 +1106,8 @@ class BrowserHost {
     const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
     if (!tab) {
       const closedOwner = this.closedTurnOwners.get(traceId);
+      const closedLifecycle = this.closedTurnLifecycles?.get(traceId);
+      if (closedOwner === helperPid && closedLifecycle) return closedLifecycle;
       if (closedOwner === helperPid) throw new Error(`Browser turn ${traceId} was already released`);
       throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);
     }
@@ -759,7 +1116,9 @@ class BrowserHost {
     }
     if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
     tab.lastHeartbeatAt = Date.now();
-    return this.snapshot();
+    const lifecycle = this.turnLifecycleSnapshot(tab);
+    if (lifecycle.status === "destroyed") this.removeTurnTab(tab, true, "lifecycle-destroyed");
+    return lifecycle;
   }
 
   reapExpiredTurnTabs(now = Date.now()) {
@@ -777,7 +1136,7 @@ class BrowserHost {
         helperPid: tab.helperPid,
         evidence,
       });
-      this.removeTurnTab(tab, true);
+      this.removeTurnTab(tab, true, evidence);
     }
   }
 
@@ -828,13 +1187,22 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  removeTurnTab(tab, abortRunning) {
+  removeTurnTab(tab, abortRunning, releaseReason = abortRunning ? "host-abort" : "turn-ended") {
     if (!this.turnTabs.has(tab.id)) return;
     this.turnTabs.delete(tab.id);
     if (abortRunning && tab.status === "running") {
       this.closedTurnOwners.set(tab.traceId, tab.helperPid);
+      const lifecycle = this.turnLifecycleSnapshot(tab);
+      if (lifecycle.status === "gone" || lifecycle.status === "destroyed") {
+        this.closedTurnLifecycles?.set(tab.traceId, lifecycle);
+      }
       tab.status = "aborted";
     }
+    this.flightRecorder?.record(tab.traceId, "browser-surface-release", {
+      outcome: tab.status,
+      reason: releaseReason,
+    });
+    this.flightRecorder?.stopSurface(tab.surfaceId, tab.status);
     try { this.window.contentView.removeChildView(tab.view); } catch {}
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     if (this.selectedTabId === tab.id) {
@@ -856,7 +1224,7 @@ class BrowserHost {
   closeTab(tabId) {
     const tab = this.turnTabs.get(tabId);
     if (!tab) throw new Error("Browser tab does not exist");
-    this.removeTurnTab(tab, true);
+    this.removeTurnTab(tab, true, "operator-tab-close");
     this.logger.info("browser.tab_closed", { tabId, traceId: tab.traceId, status: tab.status });
     return this.snapshot();
   }
@@ -1032,6 +1400,7 @@ class BrowserHost {
       existing.bootstrapReady = false;
       existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
       existing.lastHeartbeatAt = Date.now();
+      this.updateTurnLifecycle(existing, "active", "created");
       if (!existing.view.webContents.isDestroyed()) {
         existing.view.webContents.setBackgroundThrottling(false);
       }
@@ -1041,7 +1410,11 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
-      return { surfaceId: existing.surfaceId, tabId: existing.id };
+      return {
+        surfaceId: existing.surfaceId,
+        tabId: existing.id,
+        lifecycle: this.turnLifecycleSnapshot(existing),
+      };
     }
     const tab = this.createTurnTab(traceId, helperPid);
     this.selectedTabId = tab.id;
@@ -1049,7 +1422,7 @@ class BrowserHost {
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    return { surfaceId: tab.surfaceId, tabId: tab.id };
+    return { surfaceId: tab.surfaceId, tabId: tab.id, lifecycle: this.turnLifecycleSnapshot(tab) };
   }
 
   async endTurn(traceId, helperPid, status, hideAfterTurn, message) {
@@ -1058,6 +1431,7 @@ class BrowserHost {
       const closedOwner = this.closedTurnOwners.get(traceId);
       if (closedOwner === helperPid) {
         this.closedTurnOwners.delete(traceId);
+        this.closedTurnLifecycles?.delete(traceId);
         return;
       }
       throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);
@@ -1078,7 +1452,7 @@ class BrowserHost {
     // tabs leaked one slot per response/compaction until the five-tab safety limit made later
     // turns fail. The result already lives in Codex; release the browser document on every
     // terminal path while leaving other concurrently running tabs untouched.
-    this.removeTurnTab(tab, false);
+    this.removeTurnTab(tab, false, `turn-end-${status}`);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
     this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
   }
@@ -1493,6 +1867,12 @@ class BrowserHost {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     this.turnTabs.clear();
+    try {
+      const browserSession = this.view?.webContents?.session;
+      const binding = browserSession && chatGptNetworkFailureBindings.get(browserSession);
+      if (binding?.host === this) binding.host = null;
+    } catch {}
+    this.flightRecorder?.destroy();
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
 }
@@ -1500,10 +1880,13 @@ class BrowserHost {
 module.exports = {
   allowedAuthUrl,
   BrowserHost,
+  CHATGPT_NETWORK_FAILURE_FILTER,
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
+  privacySafeNavigationIdentity,
+  privacySafeNetworkRequestIdentity,
   TEMPORARY_CHAT_URL,
   validateChatGptStorageState,
 };

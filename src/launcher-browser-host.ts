@@ -32,6 +32,28 @@ export interface LauncherBrowserConnection {
   page: Page;
 }
 
+export interface LauncherTurnLifecycleState {
+  traceId: string;
+  surfaceId: string;
+  rendererPid: number | null;
+  status: "active" | "unresponsive" | "gone" | "destroyed";
+  event: "created" | "responsive" | "unresponsive" | "render-process-gone" | "destroyed";
+  revision: number;
+  reason?: string;
+}
+
+/**
+ * Launcher admission failure proven to occur before any turn-start control request is dispatched.
+ * A lost response after dispatch is deliberately not this type because Electron may already have
+ * created the lease.
+ */
+export class LauncherBrowserHostPreLeaseError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LauncherBrowserHostPreLeaseError";
+  }
+}
+
 function assertLoopbackEndpoint(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is missing`);
   let parsed: URL;
@@ -353,6 +375,30 @@ export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
 export const LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
 
+function parseLauncherTurnLifecycle(
+  value: unknown,
+  traceId: string,
+  surfaceId?: string,
+): LauncherTurnLifecycleState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Launcher browser control channel returned no native turn lifecycle state");
+  }
+  const lifecycle = value as Partial<LauncherTurnLifecycleState>;
+  if (lifecycle.traceId !== traceId
+    || typeof lifecycle.surfaceId !== "string"
+    || !/^[A-Za-z0-9_-]{32}$/.test(lifecycle.surfaceId)
+    || (surfaceId !== undefined && lifecycle.surfaceId !== surfaceId)
+    || (lifecycle.rendererPid !== null && (!Number.isInteger(lifecycle.rendererPid) || lifecycle.rendererPid! < 1))
+    || !["active", "unresponsive", "gone", "destroyed"].includes(String(lifecycle.status))
+    || !["created", "responsive", "unresponsive", "render-process-gone", "destroyed"].includes(String(lifecycle.event))
+    || !Number.isInteger(lifecycle.revision)
+    || lifecycle.revision! < 0
+    || (lifecycle.reason !== undefined && typeof lifecycle.reason !== "string")) {
+    throw new Error("Launcher browser control channel returned invalid native turn lifecycle state");
+  }
+  return lifecycle as LauncherTurnLifecycleState;
+}
+
 export async function notifyLauncherTurn(
   descriptorPath: string,
   activity: LauncherTurnActivity,
@@ -361,8 +407,15 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
-): Promise<{ surfaceId?: string }> {
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+): Promise<{ surfaceId?: string; lifecycle?: LauncherTurnLifecycleState }> {
+  let descriptor: LauncherBrowserHostDescriptor;
+  try {
+    descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  } catch (error) {
+    if (activity.phase !== "start") throw error;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    throw new LauncherBrowserHostPreLeaseError(cause.message, { cause });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -384,7 +437,13 @@ export async function notifyLauncherTurn(
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
       }
-      return { surfaceId: body.surfaceId };
+      return {
+        surfaceId: body.surfaceId,
+        lifecycle: parseLauncherTurnLifecycle(body.lifecycle, activity.traceId, body.surfaceId),
+      };
+    }
+    if (activity.phase === "heartbeat") {
+      return { lifecycle: parseLauncherTurnLifecycle(body.lifecycle, activity.traceId) };
     }
     return {};
   } catch (error) {

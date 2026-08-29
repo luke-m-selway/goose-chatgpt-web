@@ -18,6 +18,7 @@ const {
 } = require("electron");
 const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
+const { NativeScreenshotFlightRecorder, resolveNativeFlightRecorderConfig } = require("./flight-recorder.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -709,6 +710,13 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
   });
+  let observationConfig;
+  try { observationConfig = runtimeSupervisor.readConfig().observation; } catch {}
+  const screenshotFlightRecorder = new NativeScreenshotFlightRecorder(
+    resolveNativeFlightRecorderConfig(observationConfig, CORE_HOME),
+  );
+  screenshotFlightRecorder.recordProcess("process-started", { pid: process.pid });
+  runtimeSupervisor.flightRecorder = screenshotFlightRecorder;
   browserHost = new BrowserHost({
     window: mainWindow,
     descriptorPath: BROWSER_DESCRIPTOR_PATH,
@@ -718,6 +726,7 @@ async function start() {
     logger,
     loginWithSystemBrowser: () => runtimeHost.captureSystemBrowserLogin(),
     publishState: (state) => send("launcher:browser-state", state),
+    flightRecorder: screenshotFlightRecorder,
   });
   await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();

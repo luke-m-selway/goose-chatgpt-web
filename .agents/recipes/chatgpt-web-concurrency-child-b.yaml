@@ -1,0 +1,26 @@
+version: "1.0.0"
+title: ChatGPT-Web Concurrency Child B
+description: Read-only BrowserHost concurrency qualification workload for child B.
+settings:
+  goose_provider: custom_chatgpt_web__local_1
+  goose_model: chatgpt-web/medium
+  max_turns: 12
+instructions: |
+  You are child B in a ChatGPT-Web concurrency qualification. Work only in the current repository.
+  Make no changes. Do not start, stop, restart, or inspect browser surfaces directly. Use the
+  inherited normal Goose tools; do not disable extensions. Complete the exact bounded workload in
+  the prompt, report six concise findings, and end with the exact terminal marker child-b-ok.
+prompt: |
+  Perform this read-only workload using at least three separate Goose Native shell calls:
+
+  1. Run `pwd` and `git status --short`.
+  2. Read `src/launcher-browser-host.ts` and `launcher/electron/control-server.cjs`.
+  3. Read the liveness tests in `tests/goose-compaction-liveness.test.ts` and
+     `launcher/tests/browser-host.test.cjs`.
+  4. Inspect `docs/architecture.md` for the Goose, daemon, BrowserHost, and tunnel boundaries.
+  5. Report six concise findings covering surface identity, renderer lifecycle revisions,
+     heartbeat transport, sibling isolation, slow-probe recovery, and forbidden death inference.
+
+  Make no modifications. End the final response with exactly:
+
+  child-b-ok

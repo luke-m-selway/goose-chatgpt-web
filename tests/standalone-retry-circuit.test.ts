@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
@@ -12,6 +13,7 @@ import { defaultConfig } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
 import { prepareStandaloneTextRequest, prepareStandaloneToolRequest, routeChatGptWebRequest } from "../src/server";
 import type { AdapterEvent, CodexProviderConfig } from "../src/types";
+import { LAUNCHER_BROWSER_HOST_KIND } from "../src/launcher-browser-host";
 
 const scope = "standalone-test-scope";
 const model = "chatgpt-web/high";
@@ -406,6 +408,294 @@ test("retry snapshots remove only bridge identity and volatile turn context befo
   expect(secondSnapshot.slice(0, firstSnapshot.length)).toEqual(firstSnapshot);
   expect(JSON.stringify(firstSnapshot)).not.toContain("standalone_");
   expect(JSON.stringify(firstSnapshot)).not.toContain("<turn-context>");
+});
+
+test("helper-side launcher admission classifies only pre-dispatch descriptor failure as retryable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-helper-side-prelease-"));
+  const descriptorPath = join(root, "missing-launcher.json");
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://helper-side-prelease-${process.pid}-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: descriptorPath,
+      localToolsEnabled: false,
+      proAvailable: true,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const runExclusive = (worker as unknown as { runExclusive(turn: BrowserTurn): Promise<string> }).runExclusive.bind(worker);
+  try {
+    const failure = await runExclusive({
+      traceId: "helper-prelease-1",
+      modelId: "gpt-5.6-sol",
+      reasoning: "high",
+      capabilities: { localToolsEnabled: false, proAvailable: true },
+      prepare: async () => ({ text: "inspect", images: [], release() {} }),
+      onTextDelta() {},
+    }).then(() => undefined, error => error);
+    expect(failure).toBeInstanceOf(ChatGptWebAdapterError);
+    expect(failure).toMatchObject({
+      status: 503,
+      code: "chatgpt_browser_host_unavailable",
+      retryable: true,
+      message: `Launcher browser host is unavailable: descriptor is missing at ${descriptorPath}`,
+    });
+  } finally {
+    await worker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing BrowserHost descriptor is retired before exact-key recovery and successful replay stays cached", async () => {
+  const unique = `${process.pid}-${Date.now()}-prelease-recovery`;
+  const root = mkdtempSync(join(tmpdir(), `cgw-prelease-recovery-${unique}-`));
+  const descriptorPath = join(root, "launcher-browser.json");
+  const helperPath = join(root, "helper.cjs");
+  const config = { ...defaultConfig("browser-only"), standalone: true, proAvailable: true };
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://standalone-prelease-recovery-${unique}`,
+    chatgptWeb: {
+      standalone: true,
+      localToolsEnabled: false,
+      proAvailable: true,
+      browserHost: "launcher",
+      browserHostDescriptorPath: descriptorPath,
+      brokerSocketPath: join(root, "broker.sock"),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const mutableWorker = worker as unknown as { run(turn: BrowserTurn): Promise<string> };
+  const originalRun = mutableWorker.run.bind(worker);
+  let browserStarts = 0;
+  mutableWorker.run = turn => {
+    browserStarts += 1;
+    return originalRun(turn);
+  };
+  const adapter = createChatGptWebAdapter(provider);
+  chatGptTurnSessions.clear();
+  standaloneRetryCircuit.clear();
+
+  const parsed = () => {
+    const prepared = prepareStandaloneTextRequest({ model, stream: false, input: [user("Do the task")] }, config);
+    const request = parseRequest(prepared);
+    routeChatGptWebRequest(request, config);
+    return request;
+  };
+  const run = async () => {
+    const events: AdapterEvent[] = [];
+    await adapter.runTurn!(parsed(), { headers: new Headers() }, event => events.push(event));
+    return events;
+  };
+
+  try {
+    const first = await run();
+    expect(first.find(event => event.type === "error")).toMatchObject({
+      status: 503,
+      code: "chatgpt_browser_host_unavailable",
+      retryable: true,
+      message: `Launcher browser host is unavailable: descriptor is missing at ${descriptorPath}`,
+    });
+    expect(browserStarts).toBe(1);
+
+    writeFileSync(helperPath, `
+      const readline = require("node:readline").createInterface({ input: process.stdin });
+      const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+      send({ type: "ready" });
+      readline.on("line", line => {
+        const message = JSON.parse(line);
+        if (message.type === "shutdown") process.exit(0);
+        if (message.type !== "run") return;
+        send({ type: "event", id: message.id, event: "text", text: "recovered" });
+        send({ type: "result", id: message.id, text: "recovered" });
+      });
+    `, { mode: 0o700 });
+    writeFileSync(descriptorPath, `${JSON.stringify({
+      version: 1,
+      kind: LAUNCHER_BROWSER_HOST_KIND,
+      pid: process.pid,
+      endpoint: "http://127.0.0.1:39001",
+      control: {
+        endpoint: "http://127.0.0.1:39002",
+        token: "launcher-control-token-0123456789abcdefghijklmnop",
+      },
+      helper: { executable: process.execPath, script: helperPath },
+      partition: "persist:codex-web-gpt-chatgpt",
+      idleUrl: "about:blank#codex-web-gpt-browser-host",
+      surfaceId: "launcher_surface_id_0123456789AB",
+      createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+
+    const recovered = await run();
+    expect(recovered.some(event => event.type === "text_delta" && event.text === "recovered")).toBe(true);
+    expect(recovered.find(event => event.type === "done")).toMatchObject({ endTurn: true });
+    expect(browserStarts).toBe(2);
+
+    const replay = await run();
+    expect(replay.some(event => event.type === "text_delta" && event.text === "recovered")).toBe(true);
+    expect(replay.find(event => event.type === "done")).toMatchObject({ endTurn: true });
+    expect(browserStarts).toBe(2);
+  } finally {
+    mutableWorker.run = originalRun;
+    chatGptTurnSessions.clear();
+    standaloneRetryCircuit.clear();
+    await worker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("repeated pre-lease BrowserHost absence consumes only the existing two-attempt budget", async () => {
+  const unique = `${process.pid}-${Date.now()}-prelease-budget`;
+  const root = mkdtempSync(join(tmpdir(), `cgw-prelease-budget-${unique}-`));
+  const descriptorPath = join(root, "missing-launcher.json");
+  const config = { ...defaultConfig("browser-only"), standalone: true, proAvailable: true };
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://standalone-prelease-budget-${unique}`,
+    chatgptWeb: {
+      standalone: true,
+      localToolsEnabled: false,
+      proAvailable: true,
+      browserHost: "launcher",
+      browserHostDescriptorPath: descriptorPath,
+      brokerSocketPath: join(root, "broker.sock"),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const mutableWorker = worker as unknown as { run(turn: BrowserTurn): Promise<string> };
+  const originalRun = mutableWorker.run.bind(worker);
+  let browserStarts = 0;
+  mutableWorker.run = turn => {
+    browserStarts += 1;
+    return originalRun(turn);
+  };
+  const adapter = createChatGptWebAdapter(provider);
+  chatGptTurnSessions.clear();
+  standaloneRetryCircuit.clear();
+  const parsed = () => {
+    const prepared = prepareStandaloneTextRequest({ model, stream: false, input: [user("Do the task")] }, config);
+    const request = parseRequest(prepared);
+    routeChatGptWebRequest(request, config);
+    return request;
+  };
+  const run = async () => {
+    const events: AdapterEvent[] = [];
+    await adapter.runTurn!(parsed(), { headers: new Headers() }, event => events.push(event));
+    return events.find(event => event.type === "error");
+  };
+
+  try {
+    expect(await run()).toMatchObject({ code: "chatgpt_browser_host_unavailable", retryable: true });
+    expect(await run()).toMatchObject({ code: "chatgpt_browser_host_unavailable", retryable: true });
+    expect(await run()).toMatchObject({ code: "chatgpt_retry_circuit_open", retryable: false });
+    expect(browserStarts).toBe(2);
+  } finally {
+    mutableWorker.run = originalRun;
+    chatGptTurnSessions.clear();
+    standaloneRetryCircuit.clear();
+    await worker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ambiguous generic browser failures remain settled exact-key replay state", async () => {
+  const unique = `${process.pid}-${Date.now()}-ambiguous-replay`;
+  const config = { ...defaultConfig("browser-only"), standalone: true, proAvailable: true };
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://standalone-ambiguous-replay-${unique}`,
+    chatgptWeb: {
+      standalone: true,
+      localToolsEnabled: false,
+      proAvailable: true,
+      headed: false,
+      storageStatePath: join(tmpdir(), `cgw-ambiguous-storage-${unique}.json`),
+      brokerSocketPath: join(tmpdir(), `cgw-ambiguous-broker-${unique}.sock`),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const mutableWorker = worker as unknown as { run(turn: BrowserTurn): Promise<string> };
+  const originalRun = mutableWorker.run.bind(worker);
+  let browserStarts = 0;
+  mutableWorker.run = async () => {
+    browserStarts += 1;
+    throw new Error("AMBIGUOUS_BROWSER_FAILURE");
+  };
+  const adapter = createChatGptWebAdapter(provider);
+  chatGptTurnSessions.clear();
+  standaloneRetryCircuit.clear();
+  const parsed = () => {
+    const prepared = prepareStandaloneTextRequest({ model, stream: false, input: [user("Do the task")] }, config);
+    const request = parseRequest(prepared);
+    routeChatGptWebRequest(request, config);
+    return request;
+  };
+  const run = () => adapter.runTurn!(parsed(), { headers: new Headers() }, () => {});
+
+  try {
+    await expect(run()).rejects.toThrow("AMBIGUOUS_BROWSER_FAILURE");
+    await expect(run()).rejects.toThrow("AMBIGUOUS_BROWSER_FAILURE");
+    expect(browserStarts).toBe(1);
+  } finally {
+    mutableWorker.run = originalRun;
+    chatGptTurnSessions.clear();
+    standaloneRetryCircuit.clear();
+  }
+});
+
+test("unrelated non-retryable adapter failures remain settled exact-key replay state", async () => {
+  const unique = `${process.pid}-${Date.now()}-nonretryable-replay`;
+  const config = { ...defaultConfig("browser-only"), standalone: true, proAvailable: true };
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://standalone-nonretryable-replay-${unique}`,
+    chatgptWeb: {
+      standalone: true,
+      localToolsEnabled: false,
+      proAvailable: true,
+      headed: false,
+      storageStatePath: join(tmpdir(), `cgw-nonretryable-storage-${unique}.json`),
+      brokerSocketPath: join(tmpdir(), `cgw-nonretryable-broker-${unique}.sock`),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const mutableWorker = worker as unknown as { run(turn: BrowserTurn): Promise<string> };
+  const originalRun = mutableWorker.run.bind(worker);
+  let browserStarts = 0;
+  mutableWorker.run = async () => {
+    browserStarts += 1;
+    throw new ChatGptWebAdapterError("UNRELATED_NONRETRYABLE_FAILURE", {
+      status: 400,
+      errorType: "invalid_request_error",
+      code: "unrelated_nonretryable_failure",
+      retryable: false,
+    });
+  };
+  const adapter = createChatGptWebAdapter(provider);
+  chatGptTurnSessions.clear();
+  standaloneRetryCircuit.clear();
+  const parsed = () => {
+    const prepared = prepareStandaloneTextRequest({ model, stream: false, input: [user("Do the task")] }, config);
+    const request = parseRequest(prepared);
+    routeChatGptWebRequest(request, config);
+    return request;
+  };
+  const run = async () => {
+    const events: AdapterEvent[] = [];
+    await adapter.runTurn!(parsed(), { headers: new Headers() }, event => events.push(event));
+    return events.find(event => event.type === "error");
+  };
+
+  try {
+    expect(await run()).toMatchObject({ code: "unrelated_nonretryable_failure", retryable: false });
+    expect(await run()).toMatchObject({ code: "unrelated_nonretryable_failure", retryable: false });
+    expect(browserStarts).toBe(1);
+  } finally {
+    mutableWorker.run = originalRun;
+    chatGptTurnSessions.clear();
+    standaloneRetryCircuit.clear();
+  }
 });
 
 test("adapter containment stops browser runtime creation before the third exact retry and allows a new user turn", async () => {
